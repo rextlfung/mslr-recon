@@ -1,5 +1,5 @@
 #=
-20241017_fingertap.jl
+20241017tap.jl
 Experiment configuration for the 2024-10-17 finger-tapping fMRI dataset.
 2.4 mm isotropic, 6× pseudo-random undersampling, Nt=300 frames, 10 virtual coils.
 
