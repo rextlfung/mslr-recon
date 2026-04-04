@@ -1,0 +1,24 @@
+# Julia
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+/Manifest.toml
+
+# Data and reconstruction outputs — keep experiment configs, not data
+*.mat
+*.h5
+*.hdf5
+
+# Jupyter / Pluto notebooks (use scripts/ instead)
+*.ipynb
+*.pluto.jl
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
