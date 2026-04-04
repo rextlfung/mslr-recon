@@ -1,5 +1,5 @@
 #=
-20251106_balltap.jl
+20251106balltap.jl
 Experiment configuration for the 2025-11-06 ball phantom + finger-tapping dataset.
 2.4 mm isotropic, 6× pseudo-random undersampling, Nt=300 frames, 18 virtual coils.
 
