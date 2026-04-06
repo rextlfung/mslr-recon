@@ -1,17 +1,17 @@
 # mslr-recon
 
-**Multi-scale Locally Low-Rank (MSLR) fMRI Reconstruction in Julia**
+**Multi-scale Low-Rank (MSLR) Reconstruction in Julia**
 
-Iterative reconstruction of fMRI time series from pseudo-randomly undersampled
-3-D EPI k-space data. Uses a SENSE forward model and a **multi-scale
-decomposition** regulariser optimised with POGM (Proximal Optimised Gradient
-Method). Supports both CPU (multi-threaded) and GPU (CUDA) execution.
+Iterative reconstruction of 3D + time MRI data. Uses a SENSE forward model and
+a **multi-scale low-rank decomposition** regulariser optimised with POGM
+(Proximal Optimised Gradient Method). Supports both CPU (multi-threaded) and 
+GPU (CUDA) execution.
 
 ---
 
 ## Background
 
-Accelerated fMRI acquisitions collect only a fraction of k-space at each time
+Accelerated MRI acquisitions collect only a fraction of k-space at each time
 frame. Recovering a full image time series from this undersampled data requires
 exploiting the structure of the signal — in this case, the fact that nearby
 voxels tend to have correlated temporal dynamics (locally low-rank structure).
