@@ -2,29 +2,15 @@
 reconstruct.jl
 Multi-scale Locally Low-Rank (MSLR) fMRI Reconstruction via Decomposition.
 
-Defines module Reconstruct with a single entry point:
-
-    run_recon(; fn_ksp, fn_smaps, fn_recon_base, N, Nvc, Nt, FOV,
-                N_gre, FOV_gre, PATCH_SIZES, STRIDES, NITERS,
-                σ1A_PRECOMPUTED, use_gpu=false)
-
 GPU acceleration (use_gpu=true):
-  Requires CUDA.jl (add it with: ] add CUDA)
-  - Sensitivity maps and k-space are moved to the GPU (CuArray).
-  - The SENSE encoding operator A is built with Asense_gpu (cuFFT-based).
-  - The image X lives on GPU during POGM; results are brought back to CPU for saving.
-  - patchSVST_gpu is used for the proximal step (sequential CUSOLVER SVDs).
-  - RTX A6000 (48 GB) fits a 3-scale run (~33 GB) comfortably.
+  Single-GPU (1 device): identical to the original implementation.
+  Multi-GPU  (>1 device): uses multigpu.jl / mirt_gpu.jl.
 
-Algorithm:
-  X_final = X[:,:,:,:,1] + ... + X[:,:,:,:,Nscales]
-
-  Each component X[:,:,:,:,k] is independently constrained to be locally
-  low-rank at its own patch scale. Data consistency is enforced on the sum.
-  λ_k set by the Ong & Lustig (2016) formula (theoretically motivated, no tuning).
+The original OOM error (CUDA.OutOfGPUMemoryError requesting 27 GB) was caused
+by `cu(ksp0)` moving the FULL raw k-space to GPU before masking it.
+Fix: mask ksp on CPU first (retaining only ~1/R of the data), then cu() the result.
 
 Rex Fung, University of Michigan
-Based on main9993.jl
 =#
 
 module Reconstruct
@@ -43,14 +29,13 @@ include(joinpath(@__DIR__, "..", "src", "mirt_mod.jl"))
 include(joinpath(@__DIR__, "..", "src", "analysis.jl"))
 using .Recon, .MirtMod, .Analysis
 
-# Load GPU support if CUDA.jl is installed.
-# If CUDA is not installed, Asense_gpu / patchSVST_gpu will be unavailable
-# and use_gpu=true will raise a clear error.
 const _CUDA_AVAILABLE = try
     using CUDA
     include(joinpath(@__DIR__, "..", "src", "sense_gpu.jl"))
-    using .SenseGPU
-    CUDA.functional()          # true only if a working GPU is present
+    include(joinpath(@__DIR__, "..", "src", "mirt_gpu.jl"))
+    include(joinpath(@__DIR__, "..", "src", "multigpu.jl"))
+    using .SenseGPU, .MirtGPU, .MultiGPU
+    CUDA.functional()
 catch
     false
 end
@@ -71,22 +56,54 @@ function run_recon(;
     STRIDES::Vector,
     NITERS::Int,
     σ1A_PRECOMPUTED::Union{Float64,Nothing},
-    use_gpu::Bool = false,
+    use_gpu::Bool=false,
 )
-    # ── GPU sanity check ──────────────────────────────────────────────────────
+    # ── GPU detection ─────────────────────────────────────────────────────────
+    use_multigpu = false
+    gpu_ids = Int[]
+    mom_type = :pogm
+
     if use_gpu
         _CUDA_AVAILABLE || error(
             "use_gpu=true requires CUDA.jl and a working NVIDIA GPU.\n" *
-            "Install CUDA.jl with:  julia -e 'using Pkg; Pkg.add(\"CUDA\")'")
-        println("GPU acceleration enabled  (device: ", CUDA.name(CUDA.device()), ")")
-        println("  Free VRAM: ", round(CUDA.available_memory() / 1e9; digits=1), " GB  /  ",
-                round(CUDA.total_memory()     / 1e9; digits=1), " GB total")
+            "Install with:  julia -e 'using Pkg; Pkg.add(\"CUDA\")'")
+
+        gpu_ids = detect_gpus()
+
+        if length(gpu_ids) > 1
+            use_multigpu = true
+            Nx, Ny, Nz = N
+            img_sz = (Nx, Ny, Nz, Nt)
+
+            min_free_gb = minimum(gpu_ids) do d
+                CUDA.device!(d)
+                round(CUDA.available_memory() / 1e9; digits=1)
+            end
+            CUDA.device!(0)
+
+            mom_type = recommend_mom(img_sz, length(PATCH_SIZES),
+                length(gpu_ids), min_free_gb)
+            peak_gb, n_live = estimate_vram(img_sz, length(PATCH_SIZES),
+                length(gpu_ids); mom=mom_type)
+
+            println("Multi-GPU mode: $(length(gpu_ids)) device(s).")
+            println("  Tightest device free VRAM : $(min_free_gb) GB")
+            println("  Momentum selected         : $mom_type " *
+                    "($n_live bufs × $(round(prod(img_sz)*8/1e9;digits=1)) GB" *
+                    " = $(peak_gb) GB peak per device)")
+        else
+            println("Single-GPU mode  (device: ", CUDA.name(CUDA.device()), ")")
+            println("  Free VRAM: ",
+                round(CUDA.available_memory() / 1e9; digits=1), " GB  /  ",
+                round(CUDA.total_memory() / 1e9; digits=1), " GB total")
+        end
     end
 
     Nx, Ny, Nz = N
-    Nscales    = length(PATCH_SIZES)
+    Nscales = length(PATCH_SIZES)
 
-    # ── 1. Sensitivity maps: load, crop, interpolate, normalise ──────────────
+
+    # ── 1. Sensitivity maps ───────────────────────────────────────────────────
     println("Loading sensitivity maps …")
     smaps_raw = matread(fn_smaps)["smaps_raw"]
 
@@ -121,13 +138,13 @@ function run_recon(;
 
     # ── 3. Normalise k-space ──────────────────────────────────────────────────
     println("Normalising k-space …")
-    img0         = sense_comb(ksp0, smaps_cpu)
+    img0 = sense_comb(ksp0, smaps_cpu)
     scale_factor = quantile(vec(abs.(img0)), 0.99)
-    ksp0        ./= max(scale_factor, eps(Float32))
+    ksp0 ./= max(scale_factor, eps(Float32))
     println("  Scale factor = ", round(scale_factor; digits=4))
 
 
-    # ── 4. Sampling mask and validation ───────────────────────────────────────
+    # ── 4. Sampling mask ──────────────────────────────────────────────────────
     Ω = (ksp0[:, :, :, 1, :] .!= 0)
     R = prod(N) / sum(Ω[:, :, :, 1])
     println("Acceleration factor R ≈ ", round(R; digits=2))
@@ -136,41 +153,63 @@ function run_recon(;
         @assert Ω == (ksp0[:, :, :, ic, :] .!= 0) "Coil $ic has a different sampling pattern"
     end
     for it in 2:Nt
-        @assert sum(Ω[:, :, :, it]) == sum(Ω[:, :, :, it-1]) "Frame $it has a different sample count"
+        @assert sum(Ω[:, :, :, it]) == sum(Ω[:, :, :, it-1]) "Frame $it has different sample count"
     end
 
 
-    # ── 5. Move data to GPU (if requested) ────────────────────────────────────
+    # ── 5. Mask k-space ON CPU, then move only the sampled subset to GPU ──────
+    #
+    # CRITICAL: never call cu(ksp0).
+    # ksp0 for N=(90,90,60), Nvc=18, Nt=387 is 27 GB — far exceeds 11 GB VRAM.
+    # The masked ksp is ksp0/R ≈ 4.5 GB at R=6, which fits on GPU 0.
+    #
+    # Flatten spatial dims so boolean indexing matches the original GPU path:
+    #   original: reshape(ksp0_gpu, :, Nvc, Nt)[vec(s), :, it]
+    # where s = eachslice(Ω; dims=4)[it] has shape (Nx,Ny,Nz) and
+    # vec(s) is a Bool vector of length Nx*Ny*Nz.
+    # ksp0[vec(Ω[:,:,:,it]), :, it] would try to index a 5-D array with a
+    # flat bool vector for the first dim — wrong. Reshape first.
+    println("Masking k-space on CPU …")
+    ksp0_flat = reshape(ksp0, Nx * Ny * Nz, Nvc, Nt)   # (Nvox, Nvc, Nt)
+    ksp_cpu = cat([ksp0_flat[vec(s), :, it]
+                   for (it, s) in enumerate(eachslice(Ω; dims=4))]...; dims=3)
+    println("  Masked k-space: ", size(ksp_cpu),
+        "  (", round(sizeof(ksp_cpu) / 1e9; digits=2), " GB on CPU)")
+
+    ksp0 = nothing
+    GC.gc()   # free 27 GB immediately
+
+
+    # ── 6. Move smaps and masked ksp to GPU 0 ────────────────────────────────
     if use_gpu
-        println("Moving data to GPU …")
-        smaps = cu(smaps_cpu)      # CuArray{ComplexF32, 4}
-        ksp0_gpu = cu(ksp0)        # CuArray{ComplexF32, 5}
-        println("  smaps on GPU: ", typeof(smaps))
+        println("Moving smaps and masked k-space to GPU 0 …")
+        CUDA.device!(0)
+        smaps = cu(smaps_cpu)         # ~0.7 GB
+        ksp = cu(ksp_cpu)           # ~4.5 GB
+        ksp_cpu = nothing
+        GC.gc()
+        GC.gc(true)
+        println("  GPU 0 free after transfer: ",
+            round(CUDA.available_memory() / 1e9; digits=1), " GB")
     else
-        smaps    = smaps_cpu
-        ksp0_gpu = ksp0
+        smaps = smaps_cpu
+        ksp = ksp_cpu
+        ksp_cpu = nothing
     end
 
 
-    # ── 6. SENSE encoding operator A ──────────────────────────────────────────
+    # ── 7. SENSE encoding operator A ──────────────────────────────────────────
     println("Building encoding operator …")
     if use_gpu
-        # GPU-native SENSE operator: closures capture cu(smaps), use cuFFT
         Aframe = (Ω_t, S) -> Asense_gpu(Ω_t, S; fft_forward=true, unitary=true)
     else
-        # CPU SENSE operator from MIRT
         Aframe = (Ω_t, S) -> Asense(Ω_t, S; fft_forward=true, unitary=true)
     end
     A = block_diag([Aframe(s, smaps) for s in eachslice(Ω; dims=ndims(Ω))]...)
-
-    # Flatten k-space to (Nsamples, Nvc, Nt) — discard unsampled zeros
-    ksp_flat = reshape(ksp0_gpu, :, Nvc, Nt)
-    ksp = cat([ksp_flat[vec(s), :, it]
-               for (it, s) in enumerate(eachslice(Ω; dims=4))]...; dims=3)
-    println("  k-space shape after masking: ", size(ksp))
+    println("  Encoding operator built.")
 
 
-    # ── 7. Lipschitz constant ─────────────────────────────────────────────────
+    # ── 8. Lipschitz constant ─────────────────────────────────────────────────
     if isnothing(σ1A_PRECOMPUTED)
         println("Computing σ₁(A) via power iteration (may take ~20 min) …")
         _, σ1A = poweriter_mod(undim(A))
@@ -181,7 +220,7 @@ function run_recon(;
     L = Nscales * σ1A^2
 
 
-    # ── 8. Regularisation weights (Ong & Lustig 2016) ─────────────────────────
+    # ── 9. Regularisation weights ─────────────────────────────────────────────
     N_voxels = prod(N)
     λs = [
         sqrt(prod(PATCH_SIZES[k])) +
@@ -192,94 +231,145 @@ function run_recon(;
     println("Regularisation weights λs = ", round.(λs; digits=3))
 
 
-    # ── 9. Cost functions and proximal operator ───────────────────────────────
-    image_sum(X) = dropdims(sum(X; dims=5); dims=5)
+    # ── 10. Reconstruct ───────────────────────────────────────────────────────
 
-    function dc_cost(X)
-        return 0.5 * norm(A * image_sum(X) - ksp)^2
-    end
+    if use_multigpu
+        # ── Multi-GPU path ────────────────────────────────────────────────────
+        println("\nAllocating multi-GPU buffers …")
+        X0_cpu = zeros(ComplexF32, Nx, Ny, Nz, Nt, Nscales)
+        X0_cpu[:, :, :, :, 1] = Array(A' * ksp)   # initialise from A'y on GPU 0
+        mg = alloc_mg_bufs(X0_cpu, gpu_ids, mom_type)
+        X0_cpu = nothing
+        GC.gc()
 
-    function dc_cost_grad(X)
-        g = A' * (A * image_sum(X) - ksp)
-        return repeat(g; outer=[1, 1, 1, 1, Nscales])
-    end
-
-    function reg_cost(X)
-        return sum(
-            λs[k] * patch_nucnorm(img2patches(view(X, :, :, :, :, k),
-                                               PATCH_SIZES[k], STRIDES[k]))
-            for k in 1:Nscales
-        )
-    end
-
-    # Select patch proximal operator based on backend
-    _patch_svst = use_gpu ? patchSVST_gpu : patchSVST
-
-    g_prox = (X, c) -> begin
-        for k in 1:Nscales
-            @views X[:, :, :, :, k] = _patch_svst(
-                X[:, :, :, :, k], c * λs[k], PATCH_SIZES[k], STRIDES[k])
+        # Cost function (operates on CPU image sum, dispatches A via GPU 0)
+        function dc_cost_mg(x_sum_cpu)
+            CUDA.device!(0)
+            return 0.5 * Float64(norm(A * cu(x_sum_cpu) - ksp)^2)
         end
-        return X
-    end
 
-    comp_cost = X -> dc_cost(X) + reg_cost(X)
-    logger    = (iter, xk, yk, is_restart) -> (dc_cost(xk), reg_cost(xk), is_restart)
+        reg_cost_mg(mg_state) = sum(
+            λs[k] * patch_nucnorm(img2patches(Array(mg_state.xold[k]),
+                PATCH_SIZES[k], STRIDES[k]))
+            for k in 1:Nscales)
 
+        function logger_mg(iter, xk_sum, yk_sum, is_restart)
+            dc = dc_cost_mg(xk_sum)
+            rc = reg_cost_mg(mg)
+            return (dc, rc, is_restart)
+        end
 
-    # ── 10. Initialise X ──────────────────────────────────────────────────────
-    if use_gpu
+        println("\nRunning multi-GPU POGM " *
+                "($NITERS iters, $Nscales scale(s), $mom_type, " *
+                "$(length(gpu_ids)) GPU(s)) …")
+
+        X_recon_cpu, costs = pogm_mg(
+            mg, A, ksp,
+            dc_cost_mg, λs, PATCH_SIZES, STRIDES, L, NITERS;
+            mom=mom_type,
+            restart=:gr,
+            fun=logger_mg,
+        )
+
+        # Gather all scale components for saving
+        X_cpu = cat([Array(mg.xnew[k]) for k in 1:Nscales]...; dims=5)
+
+    elseif use_gpu
+        # ── Single-GPU path (original logic) ─────────────────────────────────
+        image_sum(X) = dropdims(sum(X; dims=5); dims=5)
+
+        dc_cost(X) = 0.5 * norm(A * image_sum(X) - ksp)^2
+        dc_cost_grad(X) = repeat(A' * (A * image_sum(X) - ksp);
+            outer=[1, 1, 1, 1, Nscales])
+        reg_cost(X) = sum(
+            λs[k] * patch_nucnorm(img2patches(view(X, :, :, :, :, k),
+                PATCH_SIZES[k], STRIDES[k]))
+            for k in 1:Nscales)
+
+        g_prox = (X, c) -> begin
+            for k in 1:Nscales
+                @views X[:, :, :, :, k] = patchSVST_gpu(
+                    X[:, :, :, :, k], c * λs[k], PATCH_SIZES[k], STRIDES[k])
+            end
+            X
+        end
+
+        comp_cost = X -> dc_cost(X) + reg_cost(X)
+        logger = (iter, xk, yk, rs) -> (dc_cost(xk), reg_cost(xk), rs)
+
         X0 = CUDA.zeros(ComplexF32, Nx, Ny, Nz, Nt, Nscales)
+        X0[:, :, :, :, 1] = A' * ksp
+
+        println("\nRunning POGM ($NITERS iters, $Nscales scale(s), single GPU) …")
+        X, costs = pogm_mod(X0, comp_cost, dc_cost_grad, L;
+            mom=:pogm, niter=NITERS, g_prox=g_prox, fun=logger)
+
+        X_cpu = Array(X)
+        X_recon_cpu = dropdims(sum(X_cpu; dims=5); dims=5)
+
     else
+        # ── CPU path (original logic) ─────────────────────────────────────────
+        image_sum(X) = dropdims(sum(X; dims=5); dims=5)
+
+        dc_cost(X) = 0.5 * norm(A * image_sum(X) - ksp)^2
+        dc_cost_grad(X) = repeat(A' * (A * image_sum(X) - ksp);
+            outer=[1, 1, 1, 1, Nscales])
+        reg_cost(X) = sum(
+            λs[k] * patch_nucnorm(img2patches(view(X, :, :, :, :, k),
+                PATCH_SIZES[k], STRIDES[k]))
+            for k in 1:Nscales)
+
+        g_prox = (X, c) -> begin
+            for k in 1:Nscales
+                @views X[:, :, :, :, k] = patchSVST(
+                    X[:, :, :, :, k], c * λs[k], PATCH_SIZES[k], STRIDES[k])
+            end
+            X
+        end
+
+        comp_cost = X -> dc_cost(X) + reg_cost(X)
+        logger = (iter, xk, yk, rs) -> (dc_cost(xk), reg_cost(xk), rs)
+
         X0 = zeros(ComplexF32, Nx, Ny, Nz, Nt, Nscales)
+        X0[:, :, :, :, 1] = A' * ksp
+
+        println("\nRunning POGM ($NITERS iters, $Nscales scale(s), CPU) …")
+        X, costs = pogm_mod(X0, comp_cost, dc_cost_grad, L;
+            mom=:pogm, niter=NITERS, g_prox=g_prox, fun=logger)
+
+        X_cpu = X
+        X_recon_cpu = dropdims(sum(X_cpu; dims=5); dims=5)
     end
-    X0[:, :, :, :, 1] = A' * ksp
 
 
-    # ── 11. POGM ──────────────────────────────────────────────────────────────
-    backend_str = use_gpu ? "GPU" : "CPU"
-    println("\nRunning POGM ($NITERS iterations, $Nscales scale(s), $backend_str) …")
-    X, costs = pogm_mod(
-        X0, comp_cost, dc_cost_grad, L;
-        mom    = :pogm,
-        niter  = NITERS,
-        g_prox = g_prox,
-        fun    = logger,
-    )
-
-    dc_costs  = [c[1] for c in costs]
+    # ── 11. Extract cost logs ─────────────────────────────────────────────────
+    dc_costs = [c[1] for c in costs]
     reg_costs = [c[2] for c in costs]
-    restarts  = [c[3] for c in costs]
-    X_recon   = image_sum(X)
-
-    # Move results back to CPU for saving
-    if use_gpu
-        println("Moving results back to CPU …")
-        X       = Array(X)
-        X_recon = Array(X_recon)
-    end
+    restarts = [c[3] for c in costs]
 
 
     # ── 12. Save ──────────────────────────────────────────────────────────────
     fn_out = fn_recon_base * "_$(Nscales)scales.mat"
     matwrite(fn_out, Dict(
-        "X"            => X,
-        "X_recon"      => X_recon,
-        "omega"        => Ω,
-        "dc_costs"     => dc_costs,
-        "reg_costs"    => reg_costs,
-        "restarts"     => restarts,
-        "R"            => R,
-        "sigma1A"      => σ1A,
-        "L"            => L,
-        "Nscales"      => Nscales,
-        "patch_sizes"  => PATCH_SIZES,
-        "strides"      => STRIDES,
-        "lambdas"      => λs,
-        "Niters"       => NITERS,
-        "scale_factor" => scale_factor,
-        "used_gpu"     => use_gpu,
-    ); compress=true)
+            "X" => X_cpu,
+            "X_recon" => X_recon_cpu,
+            "omega" => Ω,
+            "dc_costs" => dc_costs,
+            "reg_costs" => reg_costs,
+            "restarts" => restarts,
+            "R" => R,
+            "sigma1A" => σ1A,
+            "L" => L,
+            "Nscales" => Nscales,
+            "patch_sizes" => PATCH_SIZES,
+            "strides" => STRIDES,
+            "lambdas" => λs,
+            "Niters" => NITERS,
+            "scale_factor" => scale_factor,
+            "used_gpu" => use_gpu,
+            "num_gpus" => use_multigpu ? length(gpu_ids) : (use_gpu ? 1 : 0),
+            "mom_type" => string(mom_type),
+        ); compress=true)
 
     println("\n✓ Saved → $fn_out")
 end
