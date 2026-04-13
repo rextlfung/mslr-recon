@@ -1,6 +1,8 @@
 module MultiGPU
 
-export detect_gpus, assign_scales, alloc_mg_bufs, pogm_mg, MGState, recommend_mom, estimate_vram
+export detect_gpus, assign_scales, estimate_vram, recommend_mom,
+    alloc_mg_bufs, pogm_mg, image_sum, image_sum_into!,
+    broadcast_to_fgrad!, apply_prox!, MGState
 
 #=
 multigpu.jl
@@ -95,33 +97,35 @@ end
 _nbuf(mom::Symbol) = Dict(:pogm => 11, :fpgm => 7, :pgm => 5)[mom]
 
 """
-    estimate_vram(img_sz, Nscales, ngpus; mom) -> (peak_gb_per_device, n_buffers)
+    estimate_vram(img_sz, Nscales, n_workers; mom) -> (peak_gb_per_device, n_buffers)
 
-Peak VRAM per device assuming round-robin scale assignment.
+Peak VRAM per worker device (GPU 0 excluded — it only holds smaps/ksp/SENSE).
+`n_workers` = length(gpu_ids) - 1.
 """
-function estimate_vram(img_sz::NTuple{4,Int}, Nscales::Int, ngpus::Int;
+function estimate_vram(img_sz::NTuple{4,Int}, Nscales::Int, n_workers::Int;
     mom::Symbol=:pogm)
     n = _nbuf(mom)
-    spd = cld(Nscales, ngpus)          # max scales per device
-    bytes = prod(img_sz) * 8 * n * spd   # ComplexF32 = 8 bytes
+    spd = cld(Nscales, n_workers)        # max scales per worker device
+    bytes = prod(img_sz) * 8 * n * spd     # ComplexF32 = 8 bytes
     return round(bytes / 1e9; digits=1), n
 end
 
 """
-    recommend_mom(img_sz, Nscales, ngpus, free_vram_gb) -> Symbol
+    recommend_mom(img_sz, Nscales, n_workers, free_vram_gb) -> Symbol
 
-Choose the most aggressive momentum type that fits with 15% headroom.
+Choose the most aggressive momentum type that fits on the worker devices
+(GPU 0 excluded) with 15% headroom.
 """
-function recommend_mom(img_sz::NTuple{4,Int}, Nscales::Int, ngpus::Int,
+function recommend_mom(img_sz::NTuple{4,Int}, Nscales::Int, n_workers::Int,
     free_vram_gb::Float64)::Symbol
     for mom in (:pogm, :fpgm, :pgm)
-        peak, _ = estimate_vram(img_sz, Nscales, ngpus; mom)
+        peak, _ = estimate_vram(img_sz, Nscales, n_workers; mom)
         peak < 0.85 * free_vram_gb && return mom
     end
-    peak_pgm, _ = estimate_vram(img_sz, Nscales, ngpus; mom=:pgm)
+    peak_pgm, _ = estimate_vram(img_sz, Nscales, n_workers; mom=:pgm)
     error("""
     Insufficient VRAM for multi-GPU reconstruction.
-    :pgm (minimum) needs $(peak_pgm) GB per device; available: $(free_vram_gb) GB.
+    :pgm (minimum) needs $(peak_pgm) GB per worker device; available: $(free_vram_gb) GB.
     Options: reduce Nt (currently $(img_sz[4])), reduce Nscales ($Nscales), or use GPUs with more VRAM.
     """)
 end
@@ -132,14 +136,15 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
-    assign_scales(Nscales, gpu_ids) -> Vector{Int}
+    assign_scales(Nscales, worker_ids) -> Vector{Int}
 
-Round-robin assignment. Returns dev_of[k] = CUDA device index for scale k.
+Round-robin assignment of scales to worker GPUs (GPU 0 excluded).
+Returns dev_of[k] = CUDA device index for scale k.
 """
-function assign_scales(Nscales::Int, gpu_ids::Vector{Int})::Vector{Int}
-    n = length(gpu_ids)
-    dv = [gpu_ids[mod1(k, n)] for k in 1:Nscales]
-    println("Scale → GPU assignment:")
+function assign_scales(Nscales::Int, worker_ids::Vector{Int})::Vector{Int}
+    n = length(worker_ids)
+    dv = [worker_ids[mod1(k, n)] for k in 1:Nscales]
+    println("Scale → GPU assignment (GPU 0 reserved for encoding operator):")
     for k in 1:Nscales
         println("  scale $k → GPU $(dv[k])")
     end
@@ -182,17 +187,21 @@ struct MGState
 end
 
 """
-    alloc_mg_bufs(X0_cpu, gpu_ids, mom) -> MGState
+    alloc_mg_bufs(X0_cpu, worker_ids, mom) -> MGState
 
-Allocate all POGM buffers for each scale on its assigned device.
-Only allocates buffers required for the chosen `mom` type.
+Allocate POGM buffers for each scale on its assigned worker device.
+`worker_ids` must NOT include GPU 0 (the master device).
+Only allocates the buffers actually needed for `mom`:
+  :pogm → 11 buffers  :fpgm → 7  :pgm → 5
 """
 function alloc_mg_bufs(X0_cpu::Array{ComplexF32,5},
-    gpu_ids::Vector{Int},
+    worker_ids::Vector{Int},
     mom::Symbol=:pogm)::MGState
+    0 ∈ worker_ids && error("GPU 0 is the master device and must not be in worker_ids. " *
+                            "Pass gpu_ids[2:end] (got $worker_ids).")
     Ns = size(X0_cpu, 5)
     img_sz = size(X0_cpu)[1:4]
-    dev_of = assign_scales(Ns, gpu_ids)
+    dev_of = assign_scales(Ns, worker_ids)
 
     function _alloc_vec(init_fn)
         [
@@ -204,22 +213,28 @@ function alloc_mg_bufs(X0_cpu::Array{ComplexF32,5},
     end
 
     _z(k) = CUDA.zeros(ComplexF32, img_sz)
-    _x(k) = CuArray(X0_cpu[:, :, :, :, k])   # initialise from CPU array
+    _x(k) = CuArray(X0_cpu[:, :, :, :, k])
 
-    # All buffers are allocated regardless of mom; unused ones cost memory
-    # but simplify the code.  For 11 GB GPUs choose mom=:fpgm to reduce
-    # the number of simultaneously *live* buffers in the hot path.
+    # Allocate only the buffers needed for the chosen momentum type.
+    # :pogm needs all 11; :fpgm skips uold/zold/unew/znew (7 total);
+    # :pgm additionally skips Fgradold (5 total).
+    # Unused buffers are filled with empty CuArrays to keep MGState concrete.
+    _empty(k) = CUDA.zeros(ComplexF32, ntuple(_ -> 0, 4))  # zero-size placeholder
+
+    need_uz = mom === :pogm                  # uold, zold, unew, znew
+    need_Fg0 = mom !== :pgm                   # Fgradold
+
     xold = _alloc_vec(_x)
     yold = _alloc_vec(_x)
-    uold = _alloc_vec(_x)
-    zold = _alloc_vec(_x)
+    uold = need_uz ? _alloc_vec(_x) : _alloc_vec(_empty)
+    zold = need_uz ? _alloc_vec(_x) : _alloc_vec(_empty)
     xnew = _alloc_vec(_z)
     ynew = _alloc_vec(_z)
-    unew = _alloc_vec(_z)
-    znew = _alloc_vec(_z)
+    unew = need_uz ? _alloc_vec(_z) : _alloc_vec(_empty)
+    znew = need_uz ? _alloc_vec(_z) : _alloc_vec(_empty)
     fgrad = _alloc_vec(_z)
     Fgrad = _alloc_vec(_z)
-    Fgradold = _alloc_vec(_z)
+    Fgradold = need_Fg0 ? _alloc_vec(_z) : _alloc_vec(_empty)
 
     CUDA.device!(0)
     return MGState(xold, yold, uold, zold, xnew, ynew, unew, znew,
@@ -254,6 +269,32 @@ function image_sum(mg::MGState, field::Vector{<:CuArray})::CuArray{ComplexF32,4}
         total .+= fetch(t)
     end
     return total
+end
+
+"""
+    image_sum_into!(buf, mg, field=mg.xold)
+
+In-place version of image_sum: gathers all scale slices and sums them
+into the pre-allocated `buf` on GPU 0, avoiding a fresh allocation.
+"""
+function image_sum_into!(buf::CuArray, mg::MGState,
+    field::Vector{<:CuArray}=mg.xold)
+    CUDA.device!(0)
+    fill!(buf, zero(ComplexF32))
+    tasks = [Threads.@spawn begin
+        if mg.dev_of[k] == 0
+            copy(field[k])
+        else
+            dst = CuArray{ComplexF32}(undef, mg.img_sz)
+            copyto!(dst, field[k])
+            dst
+        end
+    end for k in 1:mg.Nscales]
+    for t in tasks
+        CUDA.device!(0)
+        buf .+= fetch(t)
+    end
+    return buf
 end
 
 # Convenience: sum xold (the current iterate)
@@ -404,25 +445,31 @@ function pogm_mg(
     mu = Float64(f_mu)
     q = mu / Float64(L)
 
+    # Pre-allocate fixed-size buffers on GPU 0 for the gradient step.
+    # These are reused every iteration — no transient 4.5 GB allocations.
+    CUDA.device!(0)
+    x_sum_buf = CUDA.zeros(ComplexF32, mg.img_sz)   # Σ X_k
+    residual_buf = similar(ksp)                         # A*x - ksp  (K,Nvc,Nt)
+    g_buf = CUDA.zeros(ComplexF32, mg.img_sz)   # A'*residual
+
     told = 1.0
     sig = 1.0
     zetaold = 1.0
     Fcostold = Fcost(Array(image_sum_x(mg)))
 
     out = Vector{Any}(undef, NITERS + 1)
-    # For the logger pass CPU sums (cheap for logging, not in hot path)
     out[1] = fun(0, Array(image_sum_x(mg)), Array(image_sum_x(mg)), false)
 
     @showprogress 1 "Multi-GPU POGM ($mom)..." for iter in 1:NITERS
 
         is_restart = false
 
-        # ── 1. Gradient on GPU 0 ─────────────────────────────────────────────
+        # ── 1. Gradient on GPU 0 (fully in-place, no transient allocations) ──
         CUDA.device!(0)
-        x_sum_gpu = image_sum_x(mg)                       # gather → GPU 0
-        g_gpu = A' * (A * x_sum_gpu - ksp)            # (Nx,Ny,Nz,Nt) on GPU 0
-        broadcast_to_fgrad!(mg, g_gpu)                    # push to each device
-        g_gpu = nothing                                    # allow GC
+        image_sum_into!(x_sum_buf, mg)                # gather Σ X_k → x_sum_buf
+        residual_buf .= A * x_sum_buf .- ksp          # reuse residual_buf in-place
+        g_buf .= A' * residual_buf                    # gradient → g_buf in-place
+        broadcast_to_fgrad!(mg, g_buf)                # push to each worker device
 
         # ── 2. Momentum update (per-device, in parallel) ──────────────────────
         if mom === :pgm || mom === :fpgm

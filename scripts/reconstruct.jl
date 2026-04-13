@@ -34,10 +34,16 @@ const _CUDA_AVAILABLE = try
     include(joinpath(@__DIR__, "..", "src", "sense_gpu.jl"))
     include(joinpath(@__DIR__, "..", "src", "mirt_gpu.jl"))
     include(joinpath(@__DIR__, "..", "src", "multigpu.jl"))
-    using .SenseGPU, .MirtGPU, .MultiGPU
     CUDA.functional()
 catch
     false
+end
+
+# Bring GPU module names into Reconstruct's scope unconditionally.
+# If CUDA is unavailable these are no-ops (the modules simply don't exist,
+# but use_gpu=false means none of the functions that call them are reached).
+if _CUDA_AVAILABLE
+    using .SenseGPU, .MirtGPU, .MultiGPU
 end
 
 export run_recon
@@ -72,25 +78,9 @@ function run_recon(;
 
         if length(gpu_ids) > 1
             use_multigpu = true
-            Nx, Ny, Nz = N
-            img_sz = (Nx, Ny, Nz, Nt)
-
-            min_free_gb = minimum(gpu_ids) do d
-                CUDA.device!(d)
-                round(CUDA.available_memory() / 1e9; digits=1)
-            end
-            CUDA.device!(0)
-
-            mom_type = recommend_mom(img_sz, length(PATCH_SIZES),
-                length(gpu_ids), min_free_gb)
-            peak_gb, n_live = estimate_vram(img_sz, length(PATCH_SIZES),
-                length(gpu_ids); mom=mom_type)
-
             println("Multi-GPU mode: $(length(gpu_ids)) device(s).")
-            println("  Tightest device free VRAM : $(min_free_gb) GB")
-            println("  Momentum selected         : $mom_type " *
-                    "($n_live bufs × $(round(prod(img_sz)*8/1e9;digits=1)) GB" *
-                    " = $(peak_gb) GB peak per device)")
+            println("  GPU 0 is master (SENSE operator + gradient).")
+            println("  Momentum type will be selected after data is loaded onto GPU 0.")
         else
             println("Single-GPU mode  (device: ", CUDA.name(CUDA.device()), ")")
             println("  Free VRAM: ",
@@ -235,17 +225,59 @@ function run_recon(;
 
     if use_multigpu
         # ── Multi-GPU path ────────────────────────────────────────────────────
+
+        # Flush CUDA memory pool on all devices before measuring free VRAM.
+        # Without this, previous failed runs leave allocations in the pool
+        # that show up as "used" even though they're reclaimable.
+        for d in gpu_ids
+            CUDA.device!(d)
+            CUDA.reclaim()
+        end
+        CUDA.device!(0)
+
+        # GPU 0 is the master (holds smaps, ksp, SENSE operator).
+        # Scale slices are distributed only among worker GPUs (gpu_ids[2:end]).
+        worker_ids = gpu_ids[2:end]
+        isempty(worker_ids) && error("Multi-GPU requires at least 2 GPUs.")
+
+        # Measure free VRAM NOW — after smaps/ksp are on GPU 0 — on worker
+        # devices only (GPU 0's headroom is irrelevant for scale allocation).
+        img_sz = (Nx, Ny, Nz, Nt)
+        min_free_gb = minimum(worker_ids) do d
+            CUDA.device!(d)
+            round(CUDA.available_memory() / 1e9; digits=1)
+        end
+        CUDA.device!(0)
+
+        mom_type = recommend_mom(img_sz, Nscales, length(worker_ids), min_free_gb)
+        peak_gb, n_live = estimate_vram(img_sz, Nscales, length(worker_ids);
+            mom=mom_type)
+        println("  Worker GPUs              : $(worker_ids)")
+        println("  Tightest worker VRAM     : $(min_free_gb) GB")
+        println("  Momentum selected        : $mom_type " *
+                "($n_live bufs × $(round(prod(img_sz)*8/1e9;digits=1)) GB" *
+                " = $(peak_gb) GB peak per worker)")
+
         println("\nAllocating multi-GPU buffers …")
         X0_cpu = zeros(ComplexF32, Nx, Ny, Nz, Nt, Nscales)
         X0_cpu[:, :, :, :, 1] = Array(A' * ksp)   # initialise from A'y on GPU 0
-        mg = alloc_mg_bufs(X0_cpu, gpu_ids, mom_type)
+        mg = alloc_mg_bufs(X0_cpu, worker_ids, mom_type)
         X0_cpu = nothing
         GC.gc()
 
-        # Cost function (operates on CPU image sum, dispatches A via GPU 0)
+        # Pre-allocate a residual buffer on GPU 0 matching ksp shape.
+        # This avoids a 4.5 GB transient allocation inside dc_cost_mg every
+        # call (A*x - ksp would otherwise allocate a new CuArray each time).
+        CUDA.device!(0)
+        residual_buf = similar(ksp)   # (K, Nvc, Nt) on GPU 0
+
+        # Cost function: writes A*x_sum into residual_buf in-place, returns scalar
         function dc_cost_mg(x_sum_cpu)
             CUDA.device!(0)
-            return 0.5 * Float64(norm(A * cu(x_sum_cpu) - ksp)^2)
+            x_gpu = cu(x_sum_cpu)          # ~1.5 GB transient; freed after line
+            residual_buf .= A * x_gpu .- ksp
+            x_gpu = nothing
+            return 0.5 * Float64(norm(residual_buf)^2)
         end
 
         reg_cost_mg(mg_state) = sum(
