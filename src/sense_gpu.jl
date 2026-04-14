@@ -23,7 +23,7 @@ using LinearAlgebra
 using LinearMapsAA: LinearMapAA
 # fft/ifft on CuArrays dispatch to cuFFT via AbstractFFTs when CUDA.jl is loaded.
 # fftshift/ifftshift are pure-Julia AbstractArray operations (no special GPU import needed).
-using FFTW: fft, ifft, fftshift, ifftshift
+using FFTW: fftshift, ifftshift
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -68,10 +68,8 @@ function Asense_gpu(samp::AbstractArray{Bool}, smaps::CuArray;
     idx = CuArray(Int32.(findall(vec(samp))))
 
     # ── Forward: image (N...) → sampled k-space (K, Nc) ─────────────────────
-    # No ::AbstractVector annotation: block_diag composition can pass a
-    # multi-dimensional CuArray. We vec() inside to handle both cases.
-    function fwd(x_in)
-        x  = reshape(CuVector{ComplexF32}(vec(x_in)), N...)  # (Nx, Ny, Nz)
+    function fwd(x_vec::AbstractVector)
+        x  = reshape(CuVector{ComplexF32}(x_vec), N...)   # (Nx, Ny, Nz)
         xc = smaps .* x                                    # (Nx, Ny, Nz, Nc)
         if fft_forward
             kc = scale .* fftshift(fft(ifftshift(xc, D), D), D)
@@ -83,8 +81,8 @@ function Asense_gpu(samp::AbstractArray{Bool}, smaps::CuArray;
     end
 
     # ── Adjoint: sampled k-space (K, Nc) → image (N...) ─────────────────────
-    function adj(y_in)
-        y = reshape(CuVector{ComplexF32}(vec(y_in)), K, Nc)  # (K, Nc)
+    function adj(y_vec::AbstractVector)
+        y = reshape(CuVector{ComplexF32}(y_vec), K, Nc)    # (K, Nc)
 
         # Scatter y back to full k-space grid
         kc_full = CUDA.zeros(ComplexF32, prod(N), Nc)      # (prod(N), Nc)
