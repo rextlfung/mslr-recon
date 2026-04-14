@@ -24,11 +24,16 @@ communicated (these are Float64 scalars, essentially zero communication cost).
 
 The ONLY cross-device communication per iteration is:
   1. image_sum: Σ_k X_k  →  each device sends its slice to GPU 0  (~1.4 GB/slice)
-  2. gradient scalar g = A'*(A*x_sum - ksp) computed on GPU 0  (~1.4 GB)
+  2. gradient g = A'*(A*x_sum) - Atksp computed frame-by-frame on GPU 0
   3. g broadcast from GPU 0 to each device  (~1.4 GB/device)
 
-Everything else (znew, unew, Fgrad, ynew, momentum) is computed LOCALLY on
-each device using only that device's own slice and the shared scalar coefficients.
+ksp is NEVER resident on GPU 0.  Instead, A'*ksp (Atksp, shape (Nx,Ny,Nz,Nt))
+is pre-computed once frame-by-frame and held on GPU 0 (~1.5 GB).  The gradient
+is then A'*(A*x)_t - Atksp_t, computed one frame at a time (~12 MB peak transient).
+
+GPU 0 peak memory during gradient step:
+  smaps  (~0.65 GB) + Atksp (1.5 GB) + x_sum_buf (1.5 GB) + g_buf (1.5 GB)
+  + one-frame transient (~16 MB)  ≈  5.2 GB  (fits comfortably on 11 GB cards)
 
 Buffer layout per device (per scale k on device dev_of[k]):
   X_k  slice     : (Nx,Ny,Nz,Nt) ComplexF32  — the iterate
@@ -38,9 +43,6 @@ Buffer layout per device (per scale k on device dev_of[k]):
   fg_k, Fg_k     : same shape  — fgrad (gradient copy), Fgrad
   Fg0_k          : same shape  — Fgradold
   Total: 11 buffers per scale × 1.4 GB = 15.4 GB per scale at Nt=387.
-
-At 11 GB per device this requires Nt ≤ ~280 for 1 scale/device, or
-use fewer buffers by choosing mom=:fpgm (7 buffers = 9.8 GB, fits for Nt=387).
 
 mom buffer counts:
   :pogm  11 buffers × 1.4 GB ≈ 15.4 GB  (needs 24 GB GPU for Nt=387)
@@ -99,7 +101,7 @@ _nbuf(mom::Symbol) = Dict(:pogm => 11, :fpgm => 7, :pgm => 5)[mom]
 """
     estimate_vram(img_sz, Nscales, n_workers; mom) -> (peak_gb_per_device, n_buffers)
 
-Peak VRAM per worker device (GPU 0 excluded — it only holds smaps/ksp/SENSE).
+Peak VRAM per worker device (GPU 0 excluded — it only holds smaps/Atksp/SENSE).
 `n_workers` = length(gpu_ids) - 1.
 """
 function estimate_vram(img_sz::NTuple{4,Int}, Nscales::Int, n_workers::Int;
@@ -409,23 +411,28 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
-    x_sum, out = pogm_mg(mg, A, ksp, Fcost, λs, PATCH_SIZES, STRIDES, L, NITERS;
+    x_sum, out = pogm_mg(mg, A_frames, Atksp, Fcost_gpu, λs, PATCH_SIZES, STRIDES, L, NITERS;
                           mom, restart, restart_cutoff, bsig, f_mu, fun)
 
 Full multi-GPU POGM for MSLR.  All POGM buffers live in `mg` (an MGState);
 no heap allocation occurs inside the loop.
 
-`A` and `ksp` live on GPU 0.  The gradient A'*(A*Σ X_k - ksp) is computed
-on GPU 0, then broadcast to each device's fgrad buffer.  Per-device arithmetic
-(znew, unew, etc.) is dispatched in parallel via Threads.@spawn.
+`A_frames` is a Vector of per-frame SENSE operators on GPU 0.
+`Atksp` is the pre-computed A'*ksp (Nx,Ny,Nz,Nt) CuArray on GPU 0 — ksp itself
+is never held on GPU.  The gradient is computed frame-by-frame as
+  g_t = A_frames[t]' * (A_frames[t] * x_t) - Atksp_t
+which keeps peak transient allocation at ~16 MB per frame rather than 4.5 GB.
+
+`Fcost_gpu` is a cost function that takes the summed CuArray directly
+(no CPU round-trip needed inside the POGM loop).
 
 Returns the summed image (CPU Array) and the cost log vector.
 """
 function pogm_mg(
     mg::MGState,
-    A,
-    ksp::CuArray,
-    Fcost::Function,
+    A_frames::Vector,
+    Atksp::CuArray,
+    Fcost_gpu::Function,
     λs::Vector{<:Real},
     PATCH_SIZES::Vector,
     STRIDES::Vector,
@@ -446,30 +453,37 @@ function pogm_mg(
     q = mu / Float64(L)
 
     # Pre-allocate fixed-size buffers on GPU 0 for the gradient step.
-    # These are reused every iteration — no transient 4.5 GB allocations.
+    # ksp is never resident on GPU 0; the gradient is A'*(A*x)_t - Atksp_t,
+    # computed one frame at a time to keep the peak transient at ~16 MB.
     CUDA.device!(0)
-    x_sum_buf = CUDA.zeros(ComplexF32, mg.img_sz)   # Σ X_k
-    residual_buf = similar(ksp)                         # A*x - ksp  (K,Nvc,Nt)
-    g_buf = CUDA.zeros(ComplexF32, mg.img_sz)   # A'*residual
+    Nx, Ny, Nz, Nt_loc = mg.img_sz
+    x_sum_buf = CUDA.zeros(ComplexF32, mg.img_sz)   # Σ X_k  (1.5 GB)
+    g_buf     = CUDA.zeros(ComplexF32, mg.img_sz)   # A'*(A*x) - Atksp  (1.5 GB)
 
     told = 1.0
     sig = 1.0
     zetaold = 1.0
-    Fcostold = Fcost(Array(image_sum_x(mg)))
+    image_sum_into!(x_sum_buf, mg)
+    Fcostold = Fcost_gpu(x_sum_buf)
 
     out = Vector{Any}(undef, NITERS + 1)
-    out[1] = fun(0, Array(image_sum_x(mg)), Array(image_sum_x(mg)), false)
+    out[1] = fun(0, Array(x_sum_buf), Array(x_sum_buf), false)
 
     @showprogress 1 "Multi-GPU POGM ($mom)..." for iter in 1:NITERS
 
         is_restart = false
 
-        # ── 1. Gradient on GPU 0 (fully in-place, no transient allocations) ──
+        # ── 1. Gradient on GPU 0 (frame-by-frame, no residual buffer) ─────────
         CUDA.device!(0)
-        image_sum_into!(x_sum_buf, mg)                # gather Σ X_k → x_sum_buf
-        residual_buf .= A * x_sum_buf .- ksp          # reuse residual_buf in-place
-        g_buf .= A' * residual_buf                    # gradient → g_buf in-place
-        broadcast_to_fgrad!(mg, g_buf)                # push to each worker device
+        image_sum_into!(x_sum_buf, mg)
+        fill!(g_buf, zero(ComplexF32))
+        for t in 1:Nt_loc
+            x_t  = view(x_sum_buf, :, :, :, t)
+            Ax_t = A_frames[t] * vec(x_t)                              # (K·Nc,)
+            view(g_buf, :, :, :, t) .= reshape(A_frames[t]' * Ax_t, Nx, Ny, Nz) .-
+                                        view(Atksp, :, :, :, t)
+        end
+        broadcast_to_fgrad!(mg, g_buf)
 
         # ── 2. Momentum update (per-device, in parallel) ──────────────────────
         if mom === :pgm || mom === :fpgm
@@ -483,7 +497,9 @@ function pogm_mg(
             # Fgrad[k] = (1/alpha) * (xold[k] - ynew[k])
             _axpby_field!(mg, mg.Fgrad, mg.xold, mg.ynew, 1 / alpha, -1 / alpha)
 
-            Fcostnew = Fcost(Array(image_sum(mg, mg.ynew)))
+            # Cost for restart check — reuse x_sum_buf as scratch
+            image_sum_into!(x_sum_buf, mg, mg.ynew)
+            Fcostnew = Fcost_gpu(x_sum_buf)
 
             if restart !== :none
                 if restart === :fr && Fcostnew > Fcostold
@@ -543,7 +559,9 @@ function pogm_mg(
             # ynew[k] = xold[k] - alpha*Fgrad[k]
             _axpby_field!(mg, mg.ynew, mg.xold, mg.Fgrad, 1.0, -alpha)
 
-            Fcostnew = Fcost(Array(image_sum(mg, mg.xnew)))
+            # Cost for restart check — reuse x_sum_buf as scratch
+            image_sum_into!(x_sum_buf, mg, mg.xnew)
+            Fcostnew = Fcost_gpu(x_sum_buf)
 
             if restart !== :none
                 if restart === :fr && Fcostnew > Fcostold
@@ -569,7 +587,7 @@ function pogm_mg(
             zetaold = zetanew
         end
 
-        # Log (gather sums; only for logging, skipped if fun returns undef)
+        # Log — gather CPU arrays and call the user-supplied logger
         xnew_sum_arr = Array(image_sum(mg, mg.xnew))
         ynew_sum_arr = Array(image_sum(mg, mg.ynew))
         out[iter+1] = fun(iter, xnew_sum_arr, ynew_sum_arr, is_restart)
