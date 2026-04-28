@@ -5,7 +5,7 @@ Multi-scale Locally Low-Rank (MSLR) fMRI Reconstruction via Decomposition.
 Defines module Reconstruct with a single entry point:
 
     run_recon(; fn_ksp, fn_smaps, fn_recon_base, N, Nvc, Nt, FOV,
-                N_gre, FOV_gre, PATCH_SIZES, STRIDES, NITERS,
+                PATCH_SIZES, STRIDES, NITERS,
                 σ1A_PRECOMPUTED, use_gpu=false)
 
 GPU acceleration (use_gpu=true):
@@ -33,7 +33,6 @@ using LinearAlgebra
 using LinearMapsAA: block_diag, undim
 using MIRT: Asense
 using Statistics, StatsBase
-using ImageTransformations: imresize
 using ProgressMeter
 using MAT, HDF5
 using Unitful: mm
@@ -65,8 +64,6 @@ function run_recon(;
     Nvc::Int,
     Nt::Int,
     FOV::Tuple,
-    N_gre::Tuple{Int,Int,Int},
-    FOV_gre::Tuple,
     PATCH_SIZES::Vector,
     STRIDES::Vector,
     NITERS::Int,
@@ -86,29 +83,10 @@ function run_recon(;
     Nx, Ny, Nz = N
     Nscales    = length(PATCH_SIZES)
 
-    # ── 1. Sensitivity maps: load, crop, interpolate, normalise ──────────────
+    # ── 1. Sensitivity maps: load, cast, normalise ───────────────────────────
     println("Loading sensitivity maps …")
-    smaps_raw = matread(fn_smaps)["smaps_raw"]
-
-    function fov_crop_range(N_src, FOV_src, FOV_dst)
-        margin = (FOV_src - FOV_dst) / FOV_src / 2 * N_src
-        return Int(round(margin + 1)):Int(round(N_src - margin))
-    end
-    xr = fov_crop_range(N_gre[1], FOV_gre[1], FOV[1])
-    yr = fov_crop_range(N_gre[2], FOV_gre[2], FOV[2])
-    zr = fov_crop_range(N_gre[3], FOV_gre[3], FOV[3])
-    smaps_crop = smaps_raw[xr, yr, zr, :]
-
-    smaps_interp = complex.(zeros(Nx, Ny, Nz, Nvc))
-    for coil in 1:Nvc
-        smaps_interp[:, :, :, coil] = complex.(
-            imresize(real(smaps_crop[:, :, :, coil]), (Nx, Ny, Nz)),
-            imresize(imag(smaps_crop[:, :, :, coil]), (Nx, Ny, Nz)),
-        )
-    end
-    smaps_cpu = ComplexF32.(
-        smaps_interp ./ (sqrt.(sum(abs2.(smaps_interp); dims=4)) .+ eps())
-    )
+    smaps_raw = ComplexF32.(matread(fn_smaps)["smaps"])
+    smaps_cpu = smaps_raw ./ (sqrt.(sum(abs2.(smaps_raw); dims=4)) .+ eps(Float32))
     println("  Sensitivity maps: ", size(smaps_cpu))
 
 

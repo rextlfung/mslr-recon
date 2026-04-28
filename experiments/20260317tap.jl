@@ -30,8 +30,6 @@ run_recon(
     Nvc             = 18,
     Nt              = 387,
     FOV             = (216mm, 216mm, 144mm),
-    N_gre           = (108, 108, 108),
-    FOV_gre         = (216mm, 216mm, 216mm),
     PATCH_SIZES     = [[90, 90, 60], [6, 6, 6], [1, 1, 1]],
     STRIDES         = [[45, 45, 30], [3, 3, 3], [1, 1, 1]],   # half-overlapping
     NITERS          = 50,

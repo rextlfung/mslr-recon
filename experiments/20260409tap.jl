@@ -24,17 +24,15 @@ using .Reconstruct
 
 run_recon(
     fn_ksp          = "/StorageRAID/rexfung/20260409tap/recon/caipi_epi_zf.mat",
-    fn_smaps        = "/StorageRAID/rexfung/20260409tap/recon/smaps_pisco.mat",
+    fn_smaps        = "/StorageRAID/rexfung/20260409tap/recon/smaps_bart.mat",
     fn_recon_base   = "/StorageRAID/rexfung/20260409tap/recon/caipi_recon",
     N               = (90, 90, 60),
     Nvc             = 18,
     Nt              = 387,
     FOV             = (216mm, 216mm, 144mm),
-    N_gre           = (108, 108, 108),
-    FOV_gre         = (216mm, 216mm, 216mm),
-    PATCH_SIZES     = [[6, 6, 6]],
-    STRIDES         = [[3, 3, 3]],   # half-overlapping
-    NITERS          = 50,
+    PATCH_SIZES     = [[90, 90, 60],[6, 6, 6], [1, 1, 1]],
+    STRIDES         = [[90, 90, 60],[3, 3, 3], [1, 1, 1]],   # half-overlapping
+    NITERS          = 100,
     σ1A_PRECOMPUTED = 1.0,
     use_gpu         = false,    # ← set false for CPU
 )
