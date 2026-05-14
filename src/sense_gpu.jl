@@ -1,12 +1,17 @@
 #=
 sense_gpu.jl
-GPU-native SENSE encoding operator and GPU patch-SVD utilities.
+GPU-native SENSE encoding operator.
 
 Requires CUDA.jl. Loaded conditionally by reconstruct.jl when use_gpu=true.
 
 Contents:
-  - Asense_gpu   : GPU-native drop-in for MIRT.Asense, built on cuFFT + CUDA.jl
-  - patchSVST_gpu: Patch-wise SVST using sequential CUSOLVER SVDs (no @threads)
+  - Asense_gpu: GPU-native drop-in for MIRT.Asense, built on cuFFT + CUDA.jl
+
+Patch operators (patchSVST, img2patches, patches2img, SVST) are NOT duplicated here
+because the implementations in src/recon.jl already dispatch correctly for CuArrays:
+  - img2patches / patches2img use `similar` → allocates CuArray when input is CuArray.
+  - _svst_loop! runs sequentially for AbstractArray (no @threads on GPU).
+  - SVST uses a full matrix multiply for AbstractArray (avoids findall on GPU).
 
 The Asense_gpu operator uses the same fftshift/scale convention as MIRT.Asense
 with fft_forward=true, unitary=true, giving σ₁(A) ≈ 1.0 for normalised smaps.
@@ -16,14 +21,14 @@ Rex Fung, University of Michigan
 
 module SenseGPU
 
-export Asense_gpu, patchSVST_gpu
+export Asense_gpu
 
 using CUDA
 using LinearAlgebra
 using LinearMapsAA: LinearMapAA
-# fft/ifft on CuArrays dispatch to cuFFT via AbstractFFTs when CUDA.jl is loaded.
-# fftshift/ifftshift are pure-Julia AbstractArray operations (no special GPU import needed).
-using FFTW: fftshift, ifftshift
+# fft/ifft are from AbstractFFTs; CUDA.jl registers cuFFT implementations for CuArrays.
+# fftshift/ifftshift are pure-Julia AbstractArray operations that work on any array type.
+using FFTW: fft, ifft, fftshift, ifftshift
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -68,8 +73,8 @@ function Asense_gpu(samp::AbstractArray{Bool}, smaps::CuArray;
     idx = CuArray(Int32.(findall(vec(samp))))
 
     # ── Forward: image (N...) → sampled k-space (K, Nc) ─────────────────────
-    function fwd(x_vec::AbstractVector)
-        x  = reshape(CuVector{ComplexF32}(x_vec), N...)   # (Nx, Ny, Nz)
+    function fwd(x_vec::AbstractArray)
+        x  = reshape(CuVector{ComplexF32}(vec(x_vec)), N...)   # (Nx, Ny, Nz)
         xc = smaps .* x                                    # (Nx, Ny, Nz, Nc)
         if fft_forward
             kc = scale .* fftshift(fft(ifftshift(xc, D), D), D)
@@ -81,8 +86,8 @@ function Asense_gpu(samp::AbstractArray{Bool}, smaps::CuArray;
     end
 
     # ── Adjoint: sampled k-space (K, Nc) → image (N...) ─────────────────────
-    function adj(y_vec::AbstractVector)
-        y = reshape(CuVector{ComplexF32}(y_vec), K, Nc)    # (K, Nc)
+    function adj(y_vec::AbstractArray)
+        y = reshape(CuVector{ComplexF32}(vec(y_vec)), K, Nc)    # (K, Nc)
 
         # Scatter y back to full k-space grid
         kc_full = CUDA.zeros(ComplexF32, prod(N), Nc)      # (prod(N), Nc)
@@ -105,121 +110,6 @@ function Asense_gpu(samp::AbstractArray{Bool}, smaps::CuArray;
                        idim = N,
                        odim = (K, Nc),
                        prop = (name = "Asense_gpu",))
-end
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# GPU patch SVD utilities
-# ──────────────────────────────────────────────────────────────────────────────
-
-"""
-    SVST_gpu(X, β) -> X_lr
-
-Singular Value Soft-Thresholding for GPU matrices.
-Uses a full matrix multiply (no `findall`) which is efficient on GPU.
-Dispatches `svd(X)` to CUSOLVER for `CuMatrix` inputs.
-"""
-function SVST_gpu(X::AbstractMatrix, β)
-    norm(X) == 0 && return fill!(similar(X), zero(eltype(X)))
-    F        = svd(X)                                      # CUSOLVER SVD for CuMatrix
-    β_T      = eltype(F.S)(β)
-    s_thresh = max.(F.S .- β_T, zero(eltype(F.S)))
-    return F.U * Diagonal(s_thresh) * F.Vt                 # full multiply, no findall
-end
-
-
-"""
-    patchSVST_gpu(img, β, patch_size, stride_size) -> img_lr
-
-Patch-wise SVST on GPU with a global threshold `β`.
-Uses sequential CUSOLVER SVDs (no CPU `@threads`).
-`img` should be a `CuArray{ComplexF32, 4}`.
-"""
-function patchSVST_gpu(img::AbstractArray, β, patch_size, stride_size)
-    P  = img2patches_gpu(img, patch_size, stride_size)
-    Np = size(P, 3)
-    for ip in 1:Np
-        P[:, :, ip] .= SVST_gpu(copy(view(P, :, :, ip)), β)
-    end
-    return patches2img_gpu(P, patch_size, stride_size, size(img)[1:3])
-end
-
-
-"""
-    patchSVST_gpu(img, λs, patch_size, stride_size) -> img_lr
-
-Patch-wise SVST on GPU with per-patch thresholds `λs` (Vector of length `Np`).
-"""
-function patchSVST_gpu(img::AbstractArray, λs::Vector, patch_size, stride_size)
-    P  = img2patches_gpu(img, patch_size, stride_size)
-    Np = size(P, 3)
-    for ip in 1:Np
-        P[:, :, ip] .= SVST_gpu(copy(view(P, :, :, ip)), λs[ip])
-    end
-    return patches2img_gpu(P, patch_size, stride_size, size(img)[1:3])
-end
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Internal GPU patch extract / recombine
-# (identical logic to recon.jl but allocation uses CUDA.zeros for clarity)
-# ──────────────────────────────────────────────────────────────────────────────
-
-function img2patches_gpu(img::AbstractArray, patch_size, stride_size)
-    Nx, Ny, Nz, Nt = size(img)
-    psx, psy, psz   = patch_size
-    ssx, ssy, ssz   = stride_size
-
-    psx = min(psx, Nx); psy = min(psy, Ny); psz = min(psz, Nz)
-
-    Nsteps_x = cld(Nx - psx, ssx)
-    Nsteps_y = cld(Ny - psy, ssy)
-    Nsteps_z = cld(Nz - psz, ssz)
-    Np = (Nsteps_x + 1) * (Nsteps_y + 1) * (Nsteps_z + 1)
-
-    P = CUDA.zeros(ComplexF32, psx * psy * psz, Nt, Np)
-
-    ip = 1
-    for iz in 0:Nsteps_z, iy in 0:Nsteps_y, ix in 0:Nsteps_x
-        sx = min(ix*ssx + 1, Nx - psx + 1)
-        sy = min(iy*ssy + 1, Ny - psy + 1)
-        sz = min(iz*ssz + 1, Nz - psz + 1)
-        patch = view(img, sx:sx+psx-1, sy:sy+psy-1, sz:sz+psz-1, :)
-        P[:, :, ip] .= reshape(patch, psx * psy * psz, Nt)
-        ip += 1
-    end
-    return P
-end
-
-function patches2img_gpu(P::AbstractArray, patch_size, stride_size, og_size)
-    _, Nt, _ = size(P)
-    psx, psy, psz = patch_size
-    ssx, ssy, ssz = stride_size
-    Nx, Ny, Nz    = og_size
-
-    psx = min(psx, Nx); psy = min(psy, Ny); psz = min(psz, Nz)
-
-    Nsteps_x = cld(Nx - psx, ssx)
-    Nsteps_y = cld(Ny - psy, ssy)
-    Nsteps_z = cld(Nz - psz, ssz)
-
-    img    = CUDA.zeros(ComplexF32, Nx, Ny, Nz, Nt)
-    Pcount = CUDA.zeros(Float32,   Nx, Ny, Nz)
-
-    ip = 1
-    for iz in 0:Nsteps_z, iy in 0:Nsteps_y, ix in 0:Nsteps_x
-        sx = min(ix*ssx + 1, Nx - psx + 1)
-        sy = min(iy*ssy + 1, Ny - psy + 1)
-        sz = min(iz*ssz + 1, Nz - psz + 1)
-        patch = reshape(view(P, :, :, ip), psx, psy, psz, Nt)
-        img[sx:sx+psx-1, sy:sy+psy-1, sz:sz+psz-1, :] .+= patch
-        Pcount[sx:sx+psx-1, sy:sy+psy-1, sz:sz+psz-1] .+= 1f0
-        ip += 1
-    end
-
-    Pcount .= max.(Pcount, 1f0)
-    img ./= Pcount
-    return img
 end
 
 end # module SenseGPU

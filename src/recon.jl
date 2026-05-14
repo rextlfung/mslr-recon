@@ -1,24 +1,27 @@
 module Recon
 
 export img2patches, patches2img, patch_nucnorm, SVST, patchSVST,
-       nn_viewshare, sense_comb,
-       img2patches2D, patches2img2D, patchSVST2D
+       nn_viewshare, sense_comb
 
 #=
 recon.jl
 Core library for iterative fMRI reconstruction via locally low-rank (LLR) regularization.
 
 Contents:
-  - Patch extraction and recombination (3D and 2D)
+  - Patch extraction and recombination: shared names dispatch on array ndims
+      img2patches / patches2img / patchSVST — 4D img (Nx,Ny,Nz,Nt) → 3D spatial patches
+      img2patches / patches2img / patchSVST — 3D img (Ny,Nz,Nt)     → 2D spatial patches
   - Nuclear-norm cost functions
   - Singular Value Soft-Thresholding (SVST) proximal operators
   - k-space utilities (nearest-neighbor view-sharing, SENSE combination)
 
-GPU compatibility notes:
+GPU compatibility notes (3D/4D path only):
   - img2patches / patches2img use `similar` for allocation so they work with
     both CPU Arrays and GPU CuArrays.
-  - patchSVST dispatches to _svst_loop! which is @threads for CPU Arrays and
-    sequential for any other AbstractArray (e.g. CuArray).
+  - patchSVST has separate Array (CPU, @threads, full patch tensor) and
+    AbstractArray (GPU, streaming per-patch) dispatches. The streaming path
+    avoids allocating the full (space × time × Np) tensor, which can exceed
+    10 GB for moderate patch sizes (e.g. 6³ patches over a 90×90×60 volume).
   - SVST dispatches on array type for the reconstruction step: CPU uses findall
     to skip zero singular values; GPU uses a full matrix multiply (findall on
     GPU triggers slow scalar indexing).
@@ -39,18 +42,14 @@ using FFTW
 """
     img2patches(img, patch_size, stride_size) -> P
 
-Extract (space × time) patches from a 4-D image time series.
+Extract (space × time) patches from a 4-D image time series `(Nx, Ny, Nz, Nt)`.
 Works on both CPU Arrays and GPU CuArrays.
-
-# Arguments
-- `img`:         4-D complex array of size `(Nx, Ny, Nz, Nt)`
-- `patch_size`:  3-vector, spatial side lengths of each cubic patch
-- `stride_size`: 3-vector, stride between patch origins
+A 2-D + time variant dispatches on `img::AbstractArray{<:Any,3}` (see below).
 
 # Returns
 - `P`: 3-D array of size `(prod(patch_size), Nt, Np)`, same array type as `img`
 """
-function img2patches(img::AbstractArray, patch_size, stride_size)
+function img2patches(img::AbstractArray{<:Any,4}, patch_size, stride_size)
     Nx, Ny, Nz, Nt = size(img)
     psx, psy, psz   = patch_size
     ssx, ssy, ssz   = stride_size
@@ -83,17 +82,16 @@ end
 
 Recombine (space × time) patches into a 4-D image via overlap-averaging.
 Works on both CPU Arrays and GPU CuArrays.
+A 2-D + time variant dispatches on `og_size::NTuple{2}` (see below).
 
 # Arguments
-- `P`:           3-D array of size `(prod(patch_size), Nt, Np)`
-- `patch_size`:  3-vector, spatial side lengths
-- `stride_size`: 3-vector, strides used during extraction
-- `og_size`:     3-vector, original spatial dimensions `(Nx, Ny, Nz)`
+- `P`:        3-D array `(prod(patch_size), Nt, Np)`
+- `og_size`:  3-tuple `(Nx, Ny, Nz)` — original spatial dimensions
 
 # Returns
-- `img`: 4-D array of size `(Nx, Ny, Nz, Nt)`, same array type as `P`
+- `img`: 4-D array `(Nx, Ny, Nz, Nt)`, same array type as `P`
 """
-function patches2img(P::AbstractArray, patch_size, stride_size, og_size)
+function patches2img(P::AbstractArray, patch_size, stride_size, og_size::NTuple{3})
     _, Nt, _ = size(P)
     psx, psy, psz = patch_size
     ssx, ssy, ssz = stride_size
@@ -134,15 +132,21 @@ end
     patch_nucnorm(P) -> cost
 
 Sum of nuclear norms across all patches. Each patch matrix is `(space × time)`.
+Multi-threaded for CPU Arrays; non-Array inputs (e.g. CuArrays) are moved to CPU first
+to avoid multi-threaded CUSOLVER calls, which are not safe and cause OOM errors.
 """
-function patch_nucnorm(P::AbstractArray)
+function patch_nucnorm(P::Array)
     @assert ndims(P) == 3 "P must be (space × time × patches)"
     Np = size(P, 3)
-    costs = zeros(Np)
+    costs = zeros(real(eltype(P)), Np)
     @threads for ip in 1:Np
         costs[ip] = sum(svdvals(view(P, :, :, ip)))
     end
     return sum(costs)
+end
+
+function patch_nucnorm(P::AbstractArray)
+    return patch_nucnorm(Array(P))
 end
 
 """
@@ -154,15 +158,19 @@ Weighted sum of nuclear norms, one weight per patch.
 - `P`:  3-D patch tensor of size `(space, time, Np)`
 - `λs`: `Np`-vector of per-patch regularization weights
 """
-function patch_nucnorm(P::AbstractArray, λs::Vector)
+function patch_nucnorm(P::Array, λs::Vector)
     @assert ndims(P) == 3 "P must be (space × time × patches)"
     Np = size(P, 3)
-    costs = zeros(Np)
+    costs = zeros(real(eltype(P)), Np)
     @threads for ip in 1:Np
         svs = svdvals(copy(P[:, :, ip]))
-        costs[ip] = svs[1] > 0 ? λs[ip] * sum(svs) : 0.0
+        costs[ip] = svs[1] > 0 ? λs[ip] * sum(svs) : zero(eltype(costs))
     end
-    return sum(costs) / Np
+    return sum(costs)
+end
+
+function patch_nucnorm(P::AbstractArray, λs::Vector)
+    return patch_nucnorm(Array(P), λs)
 end
 
 
@@ -181,8 +189,10 @@ On CPU, zero singular values are skipped for efficiency.
 On GPU, a full matrix multiply is used (findall is slow on GPU).
 """
 function SVST(X::AbstractMatrix, β)
-    # Skip SVD entirely for zero patches (avoids LAPACK SLASCL warning)
-    norm(X) == 0 && return fill!(similar(X), zero(eltype(X)))
+    # Skip SVD for zero patches to avoid LAPACK SLASCL warnings — CPU only.
+    # On GPU, calling norm() launches cuBLAS + a device→host copy per patch,
+    # which exhausts CUDA resources when called 486k times (unit-patch scale).
+    X isa Array && norm(X) == 0 && return fill!(similar(X), zero(eltype(X)))
 
     # DivideAndConquer SVD is fastest on CPU but can fail for ill-conditioned
     # matrices; fall back to QRIteration (CPU only via LAPACK)
@@ -244,28 +254,94 @@ end
 """
     patchSVST(img, β, patch_size, stride_size) -> img_lr
 
-Apply patch-wise SVST to a 4-D image with a **global** threshold `β`.
-Equivalent to the average of proximal operators for the nuclear norm.
-GPU-compatible: dispatches to sequential CUSOLVER SVDs when `img` is a CuArray.
+Apply patch-wise SVST to a 4-D image `(Nx,Ny,Nz,Nt)` with global threshold `β`.
+CPU (`Array`) path builds the full patch tensor and uses `@threads`.
+GPU (`AbstractArray`) path streams one patch at a time — avoids the O(Np) tensor
+allocation, which can exceed 10 GB for moderate patch sizes on large volumes.
+A 2-D + time variant dispatches on `img::AbstractArray{<:Any,3}` (see below).
 """
-function patchSVST(img::AbstractArray, β, patch_size, stride_size)
+function patchSVST(img::Array{<:Any,4}, β, patch_size, stride_size)
     P  = img2patches(img, patch_size, stride_size)
     Np = size(P, 3)
     _svst_loop!(P, β, Np)
     return patches2img(P, patch_size, stride_size, size(img)[1:3])
 end
 
+function patchSVST(img::AbstractArray{<:Any,4}, β, patch_size, stride_size)
+    Nx, Ny, Nz, Nt = size(img)
+    psx, psy, psz   = patch_size
+    ssx, ssy, ssz   = stride_size
+    psx = min(psx, Nx); psy = min(psy, Ny); psz = min(psz, Nz)
+
+    # Unit patches: SVST of a (1, Nt) matrix = block soft-threshold of each voxel's
+    # time series.  Vectorised over the whole volume — avoids ~486k serial cuBLAS /
+    # cuSOLVER launches that exhaust CUDA resources within a few POGM iterations.
+    if psx == 1 && psy == 1 && psz == 1
+        # norms shape: (Nx, Ny, Nz, 1); sum(abs2, ·; dims) fuses map+reduce (no temp)
+        norms = sqrt.(sum(abs2, img; dims=4))
+        β_T   = Float32(β)
+        # IEEE: β_T/0 = Inf → 1-Inf = -Inf → max(-Inf,0) = 0 for zero voxels
+        scale = max.(1f0 .- β_T ./ norms, 0f0)
+        return img .* scale
+    end
+
+    Nsteps_x = cld(Nx - psx, ssx)
+    Nsteps_y = cld(Ny - psy, ssy)
+    Nsteps_z = cld(Nz - psz, ssz)
+    img_out = fill!(similar(img, ComplexF32, Nx, Ny, Nz, Nt), zero(ComplexF32))
+    Pcount  = fill!(similar(img, Float32,   Nx, Ny, Nz),       zero(Float32))
+    for iz in 0:Nsteps_z, iy in 0:Nsteps_y, ix in 0:Nsteps_x
+        sx = min(ix*ssx + 1, Nx - psx + 1)
+        sy = min(iy*ssy + 1, Ny - psy + 1)
+        sz = min(iz*ssz + 1, Nz - psz + 1)
+        P_p = reshape(img[sx:sx+psx-1, sy:sy+psy-1, sz:sz+psz-1, :], psx*psy*psz, Nt)
+        img_out[sx:sx+psx-1, sy:sy+psy-1, sz:sz+psz-1, :] .+=
+            reshape(SVST(P_p, β), psx, psy, psz, Nt)
+        Pcount[sx:sx+psx-1, sy:sy+psy-1, sz:sz+psz-1] .+= 1f0
+    end
+    Pcount .= max.(Pcount, 1f0)
+    img_out ./= Pcount
+    return img_out
+end
+
 """
     patchSVST(img, λs, patch_size, stride_size) -> img_lr
 
-Apply patch-wise SVST with **per-patch** thresholds given by `λs` (length `Np` vector).
-GPU-compatible.
+Apply patch-wise SVST to a 4-D image with per-patch thresholds `λs` (length `Np` vector).
+CPU (`Array`) path builds the full patch tensor and uses `@threads`.
+GPU (`AbstractArray`) path streams one patch at a time.
 """
-function patchSVST(img::AbstractArray, λs::Vector, patch_size, stride_size)
+function patchSVST(img::Array{<:Any,4}, λs::Vector, patch_size, stride_size)
     P  = img2patches(img, patch_size, stride_size)
     Np = size(P, 3)
     _svst_loop!(P, λs, Np)
     return patches2img(P, patch_size, stride_size, size(img)[1:3])
+end
+
+function patchSVST(img::AbstractArray{<:Any,4}, λs::Vector, patch_size, stride_size)
+    Nx, Ny, Nz, Nt = size(img)
+    psx, psy, psz   = patch_size
+    ssx, ssy, ssz   = stride_size
+    psx = min(psx, Nx); psy = min(psy, Ny); psz = min(psz, Nz)
+    Nsteps_x = cld(Nx - psx, ssx)
+    Nsteps_y = cld(Ny - psy, ssy)
+    Nsteps_z = cld(Nz - psz, ssz)
+    img_out = fill!(similar(img, ComplexF32, Nx, Ny, Nz, Nt), zero(ComplexF32))
+    Pcount  = fill!(similar(img, Float32,   Nx, Ny, Nz),       zero(Float32))
+    ip = 1
+    for iz in 0:Nsteps_z, iy in 0:Nsteps_y, ix in 0:Nsteps_x
+        sx = min(ix*ssx + 1, Nx - psx + 1)
+        sy = min(iy*ssy + 1, Ny - psy + 1)
+        sz = min(iz*ssz + 1, Nz - psz + 1)
+        P_p = reshape(img[sx:sx+psx-1, sy:sy+psy-1, sz:sz+psz-1, :], psx*psy*psz, Nt)
+        img_out[sx:sx+psx-1, sy:sy+psy-1, sz:sz+psz-1, :] .+=
+            reshape(SVST(P_p, λs[ip]), psx, psy, psz, Nt)
+        Pcount[sx:sx+psx-1, sy:sy+psy-1, sz:sz+psz-1] .+= 1f0
+        ip += 1
+    end
+    Pcount .= max.(Pcount, 1f0)
+    img_out ./= Pcount
+    return img_out
 end
 
 
@@ -284,7 +360,7 @@ nearest acquired frame. Locations never sampled remain zero.
 - `ksp`: 5-D array of size `(Nx, Ny, Nz, Nc, Nt)`
 """
 function nn_viewshare(ksp::AbstractArray)
-    Nx, Ny, Nz, Nc, Nt = size(ksp)
+    Nx, Ny, Nz, _, Nt = size(ksp)
     ksp_nn   = zero.(ksp)
     new_grid = 1:Nt
 
@@ -310,13 +386,13 @@ Used for zero-filled or view-shared initialisation (not part of the encoding ope
 - `smaps`: 4-D sensitivity maps of size `(Nx, Ny, Nz, Nc)`
 """
 function sense_comb(ksp::AbstractArray, smaps::AbstractArray)
-    Nx, Ny, Nz, Nc, Nt = size(ksp)
+    Nx, Ny, Nz, _, Nt = size(ksp)
     img    = zeros(eltype(ksp), Nx, Ny, Nz, Nt)
-    img_mc = fftshift(ifft(ifftshift(ksp), (1, 2, 3)))
+    img_mc = fftshift(ifft(ifftshift(ksp, (1,2,3)), (1, 2, 3)), (1,2,3))
 
     for t in 1:Nt
         num   = sum(conj.(smaps) .* img_mc[:, :, :, :, t]; dims=4)
-        denom = sum(abs2.(smaps); dims=4) .+ eps()
+        denom = sum(abs2.(smaps); dims=4) .+ eps(Float32)
         img[:, :, :, t] = dropdims(num ./ denom; dims=4)
     end
     return img
@@ -324,29 +400,34 @@ end
 
 
 # ============================================================
-# 2-D Patch Operators (for 2D+time data)
+# 2-D Patch Operators — dispatch on 3-D input (Ny, Nz, Nt)
 # ============================================================
 
 """
-    img2patches2D(img, patch_size, stride_size) -> P
+    img2patches(img, patch_size, stride_size) -> P
 
-Extract 2-D spatial patches from a `(Nz, Ny, Nt)` image time series.
+Extract 2-D spatial patches from a 3-D image time series `(Ny, Nz, Nt)`.
+Dispatches on `ndims(img) == 3`; see also the 4-D variant above.
 """
-function img2patches2D(img::AbstractArray, patch_size, stride_size)
-    Nz, Ny, Nt = size(img)
-    psz, psy   = patch_size
-    ssz, ssy   = stride_size
+function img2patches(img::AbstractArray{<:Any,3}, patch_size, stride_size)
+    Ny, Nz, Nt = size(img)
+    psy, psz   = patch_size
+    ssy, ssz   = stride_size
 
-    Nsteps_z = fld(Nz - psz, ssz)
-    Nsteps_y = fld(Ny - psy, ssy)
-    Np       = (Nsteps_z + 1) * (Nsteps_y + 1)
+    psy = min(psy, Ny); psz = min(psz, Nz)
 
-    P = fill!(similar(img, ComplexF32, psz * psy, Nt, Np), zero(ComplexF32))
+    Nsteps_y = cld(Ny - psy, ssy)
+    Nsteps_z = cld(Nz - psz, ssz)
+    Np       = (Nsteps_y + 1) * (Nsteps_z + 1)
+
+    P = fill!(similar(img, ComplexF32, psy * psz, Nt, Np), zero(ComplexF32))
 
     ip = 1
     for iz in 0:Nsteps_z, iy in 0:Nsteps_y
-        patch = img[iz*ssz .+ (1:psz), iy*ssy .+ (1:psy), :]
-        P[:, :, ip] = reshape(patch, psz * psy, Nt)
+        sy = min(iy*ssy + 1, Ny - psy + 1)
+        sz = min(iz*ssz + 1, Nz - psz + 1)
+        patch = view(img, sy:sy+psy-1, sz:sz+psz-1, :)
+        P[:, :, ip] .= reshape(patch, psy * psz, Nt)
         ip += 1
     end
     return P
@@ -354,63 +435,61 @@ end
 
 
 """
-    patches2img2D(P, patch_size, stride_size, og_size) -> img
+    patches2img(P, patch_size, stride_size, og_size) -> img
 
-Recombine 2-D spatial patches into a `(Nz, Ny, Nt)` image via overlap-averaging.
+Recombine 2-D spatial patches into a 3-D image `(Ny, Nz, Nt)` via overlap-averaging.
+Dispatches on `og_size::NTuple{2}`; see also the 4-D variant above.
 """
-function patches2img2D(P::AbstractArray, patch_size, stride_size, og_size)
+function patches2img(P::AbstractArray, patch_size, stride_size, og_size::NTuple{2})
     _, Nt, _  = size(P)
-    psz, psy  = patch_size
-    ssz, ssy  = stride_size
-    Nz, Ny    = og_size
+    psy, psz  = patch_size
+    ssy, ssz  = stride_size
+    Ny, Nz    = og_size
 
-    Nsteps_z = fld(Nz - psz, ssz)
-    Nsteps_y = fld(Ny - psy, ssy)
+    psy = min(psy, Ny); psz = min(psz, Nz)
 
-    img    = fill!(similar(P, ComplexF32, Nz, Ny, Nt), zero(ComplexF32))
-    Pcount = fill!(similar(P, Float32,   Nz, Ny),      zero(Float32))
+    Nsteps_y = cld(Ny - psy, ssy)
+    Nsteps_z = cld(Nz - psz, ssz)
+
+    img    = fill!(similar(P, ComplexF32, Ny, Nz, Nt), zero(ComplexF32))
+    Pcount = fill!(similar(P, Float32,   Ny, Nz),      zero(Float32))
 
     ip = 1
     for iz in 0:Nsteps_z, iy in 0:Nsteps_y
-        patch = reshape(P[:, :, ip], psz, psy, Nt)
-        img[iz*ssz .+ (1:psz), iy*ssy .+ (1:psy), :] .+= patch
-        Pcount[iz*ssz .+ (1:psz), iy*ssy .+ (1:psy)] .+= 1f0
+        sy = min(iy*ssy + 1, Ny - psy + 1)
+        sz = min(iz*ssz + 1, Nz - psz + 1)
+        patch = reshape(view(P, :, :, ip), psy, psz, Nt)
+        img[sy:sy+psy-1, sz:sz+psz-1, :] .+= patch
+        Pcount[sy:sy+psy-1, sz:sz+psz-1] .+= 1f0
         ip += 1
     end
 
     Pcount .= max.(Pcount, 1f0)
-    for t in 1:Nt
-        img[:, :, t] ./= Pcount
-    end
+    img ./= Pcount
     return img
 end
 
 
 """
-    patchSVST2D(img, β, patch_size, stride_size) -> img_lr
+    patchSVST(img, β, patch_size, stride_size) -> img_lr
 
-Patch-wise SVST for 2-D + time data (`(Nz, Ny, Nt)`).
-Patches are normalised by their leading singular value before
-thresholding and renormalised afterwards to preserve contrast.
+Patch-wise SVST for 2-D + time data `(Ny, Nz, Nt)`.
+Patches are normalised by their leading singular value before thresholding
+and rescaled afterwards to preserve contrast. Zero patches are skipped.
+Dispatches on `ndims(img) == 3`; see also the 4-D GPU-compatible variant above.
 """
-function patchSVST2D(img::AbstractArray, β, patch_size, stride_size)
-    P  = img2patches2D(img, patch_size, stride_size)
+function patchSVST(img::AbstractArray{<:Any,3}, β, patch_size, stride_size)
+    P  = img2patches(img, patch_size, stride_size)
     Np = size(P, 3)
-
-    σ1s = [opnorm(P[:, :, ip]) for ip in 1:Np]
-    σ1s[σ1s .== 0] .= eps()
-    P ./= reshape(σ1s, 1, 1, :)
-
+    σ1s = [opnorm(view(P, :, :, ip)) for ip in 1:Np]
     @threads for ip in 1:Np
-        P[:, :, ip] = SVST(copy(view(P, :, :, ip)), β)
+        σ1s[ip] == 0 && continue
+        P[:, :, ip] ./= σ1s[ip]
+        P[:, :, ip]  .= SVST(copy(view(P, :, :, ip)), β)
+        σ1_new = opnorm(view(P, :, :, ip))
+        σ1_new > 0 && (P[:, :, ip] .*= σ1s[ip] / σ1_new)
     end
-
-    σ1s_tmp = [opnorm(P[:, :, ip]) for ip in 1:Np]
-    σ1s_tmp[σ1s_tmp .== 0] .= eps()
-    P ./= reshape(σ1s_tmp, 1, 1, :)
-    P .*= reshape(σ1s, 1, 1, :)
-
-    return patches2img2D(P, patch_size, stride_size, size(img)[1:2])
+    return patches2img(P, patch_size, stride_size, size(img)[1:2])
 end
 
 end # module Recon

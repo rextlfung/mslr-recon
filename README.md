@@ -49,9 +49,8 @@ mslr-recon/
 │
 ├── src/
 │   ├── recon.jl              # Patch extraction/recombination, SVST, k-space utilities
-│   ├── mirt_mod.jl           # POGM with restart, power iteration (modified from MIRT)
 │   ├── analysis.jl           # tSNR maps, convergence plots, detrending
-│   └── sense_gpu.jl          # GPU-native SENSE operator and patch SVD (requires CUDA.jl)
+│   └── sense_gpu.jl          # GPU-native SENSE operator (requires CUDA.jl)
 │
 ├── scripts/
 │   ├── reconstruct.jl        # Reconstruction module — called by experiment files
@@ -175,13 +174,29 @@ When `use_gpu = true`, the reconstruction:
 
 The GPU operator `Asense_gpu` uses the same FFT convention and normalization as `MIRT.Asense` with `fft_forward=true, unitary=true`, giving $\sigma_1(\mathcal{A}) \approx 1$.
 
-**Memory requirements** for `N=(90,90,60)`, `Nt=300`, ComplexF32:
+**Memory requirements**
 
-| Nscales | X size | Recommended GPU |
-|:--------|:-------|:----------------|
-| 1 | ~11 GB | RTX 3090 / A5000 (24 GB) |
-| 3 | ~33 GB | RTX A6000 (48 GB) |
-| 5 | ~55 GB | A100 (80 GB) |
+Peak VRAM is set by three terms that are simultaneously live:
+
+```
+peak ≈ 9 × |X| + |img| + 3 × |ksp| + persistent
+```
+
+where `|X| = Nx·Ny·Nz·Nt·Nscales × 8 B` (the full reconstruction tensor), `|img| = |X|/Nscales` (gradient transient), `|ksp| = (Nx·Ny·Nz/R)·Nvc·Nt × 8 B` (k-space appears 3×: 1 stored + 2 `dc_cost` transients), and `persistent` covers smaps, the sampling mask, and small index arrays. The factor of 9 comes from POGM holding nine simultaneous copies of X; use 6 for FISTA or 5 for ISTA.
+
+**Worked example** — N=90×90×60, Nt=387, Nvc=21, R=6, Nscales=2:
+
+| Term | Size |
+|:-----|-----:|
+| 9 × \|X\| (POGM buffers) | 27.1 GB |
+| \|img\| (gradient transient) | 1.5 GB |
+| 3 × \|ksp\| (k-space terms) | 15.8 GB |
+| persistent (smaps + Ω + idx) | 0.5 GB |
+| **Total** | **~44.8 GB** |
+
+Observed peak on RTX A6000 (50.9 GB VRAM): ~44 GB ✓
+
+Note that `|ksp|` does not scale with `Nscales` — adding more scales raises only the POGM buffer term. For high Nvc or long Nt, the k-space terms can dominate. The same formula applies to CPU RAM (see `CLAUDE.md` for minor CPU/GPU differences); RAM is rarely the binding constraint.
 
 ---
 
@@ -190,7 +205,7 @@ The GPU operator `Asense_gpu` uses the same FFT convention and normalization as 
 | File | Format | Key | Shape |
 |:-----|:-------|:----|:------|
 | K-space | HDF5-backed `.mat` (v7.3) | `ksp_epi_zf` | `(Nx, Ny, Nz, Nvc, Nt)` ComplexF32 |
-| Sensitivity maps | `.mat` | `smaps_raw` | `(Nx_gre, Ny_gre, Nz_gre, Nvc)` ComplexF32 |
+| Sensitivity maps | `.mat` | `smaps` | `(Nx, Ny, Nz, Nvc)` ComplexF32 |
 
 Zero entries in the k-space file are treated as unsampled. The sampling mask is inferred automatically.
 
@@ -218,7 +233,7 @@ Zero entries in the k-space file are treated as unsampled. The sampling mask is 
 
 **Lipschitz constant.** `σ₁(A) ≈ 1.0` for a unitary FFT-based SENSE operator. Set `σ1A_PRECOMPUTED = nothing` on the first run to compute it via power iteration (~20 min), then hard-code the printed value for future runs on the same acquisition geometry.
 
-**Memory.** Reduce the number of scales or set `use_gpu = false` and reduce `-t` threads if memory is tight.
+**Memory.** If VRAM is tight, reduce `Nscales` (each scale adds `9 × Nx·Ny·Nz·Nt × 8 B` to the POGM buffer term) or reduce `Nvc` at the BART sensitivity-map compression step. The k-space term `3 × |ksp|` is fixed regardless of `Nscales`. Switch to `use_gpu = false` to use RAM instead of VRAM; set `-t auto` to use all CPU threads for the patch SVDs.
 
 **Convergence.** 50 iterations is typically sufficient. Watch the convergence plot from `analyze.jl` — if the total cost is still dropping steeply at the end, increase `NITERS`.
 
@@ -236,4 +251,4 @@ Kim, D. & Fessler, J.A. (2018). Adaptive restart of the optimized gradient metho
 
 ## Acknowledgements
 
-The POGM implementation (`src/mirt_mod.jl`) is adapted from [MIRT.jl](https://github.com/JeffFessler/MIRT.jl) (Donghwan Kim & Jeff Fessler, University of Michigan).
+The POGM optimizer uses `pogm_restart` from [MIRT.jl](https://github.com/JeffFessler/MIRT.jl) (Donghwan Kim & Jeff Fessler, University of Michigan).

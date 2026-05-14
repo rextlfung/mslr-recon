@@ -10,10 +10,12 @@ Defines module Reconstruct with a single entry point:
 
 GPU acceleration (use_gpu=true):
   Requires CUDA.jl (add it with: ] add CUDA)
-  - Sensitivity maps and k-space are moved to the GPU (CuArray).
+  - Sensitivity maps, k-space, and the sampling mask are moved to the GPU (CuArray).
   - The SENSE encoding operator A is built with Asense_gpu (cuFFT-based).
   - The image X lives on GPU during POGM; results are brought back to CPU for saving.
-  - patchSVST_gpu is used for the proximal step (sequential CUSOLVER SVDs).
+  - patchSVST dispatches automatically to sequential CUSOLVER SVDs via Julia type dispatch.
+  - pogm_mod (src/mirt_mod.jl) keeps all scalar momentum coefficients in Float32 to prevent
+    CuArray{ComplexF32} promotion to Float64, which would double VRAM usage.
   - RTX A6000 (48 GB) fits a 3-scale run (~33 GB) comfortably.
 
 Algorithm:
@@ -33,22 +35,21 @@ using LinearAlgebra
 using LinearMapsAA: block_diag, undim
 using MIRT: Asense
 using Statistics, StatsBase
-using ProgressMeter
 using MAT, HDF5
 using Unitful: mm
 
 include(joinpath(@__DIR__, "..", "src", "recon.jl"))
-include(joinpath(@__DIR__, "..", "src", "mirt_mod.jl"))
 include(joinpath(@__DIR__, "..", "src", "analysis.jl"))
-using .Recon, .MirtMod, .Analysis
+include(joinpath(@__DIR__, "..", "src", "mirt_mod.jl"))
+using .Recon, .Analysis, .MirtMod
 
 # Load GPU support if CUDA.jl is installed.
-# If CUDA is not installed, Asense_gpu / patchSVST_gpu will be unavailable
+# If CUDA is not installed, Asense_gpu will be unavailable
 # and use_gpu=true will raise a clear error.
 const _CUDA_AVAILABLE = try
     using CUDA
     include(joinpath(@__DIR__, "..", "src", "sense_gpu.jl"))
-    using .SenseGPU
+    using .SenseGPU: Asense_gpu
     CUDA.functional()          # true only if a working GPU is present
 catch
     false
@@ -121,19 +122,22 @@ function run_recon(;
     # ── 5. Move data to GPU (if requested) ────────────────────────────────────
     if use_gpu
         println("Moving data to GPU …")
-        smaps = cu(smaps_cpu)      # CuArray{ComplexF32, 4}
+        smaps    = cu(smaps_cpu)   # CuArray{ComplexF32, 4}
         ksp0_gpu = cu(ksp0)        # CuArray{ComplexF32, 5}
+        Ω_idx    = cu(Ω)           # CuArray{Bool, 4} — keeps k-space indexing on GPU
         println("  smaps on GPU: ", typeof(smaps))
     else
         smaps    = smaps_cpu
         ksp0_gpu = ksp0
+        Ω_idx    = Ω
     end
 
 
     # ── 6. SENSE encoding operator A ──────────────────────────────────────────
     println("Building encoding operator …")
     if use_gpu
-        # GPU-native SENSE operator: closures capture cu(smaps), use cuFFT
+        # GPU-native SENSE operator: closures capture cu(smaps), use cuFFT.
+        # Asense_gpu internally converts the CPU Bool samp mask to CuArray indices.
         Aframe = (Ω_t, S) -> Asense_gpu(Ω_t, S; fft_forward=true, unitary=true)
     else
         # CPU SENSE operator from MIRT
@@ -141,11 +145,21 @@ function run_recon(;
     end
     A = block_diag([Aframe(s, smaps) for s in eachslice(Ω; dims=ndims(Ω))]...)
 
-    # Flatten k-space to (Nsamples, Nvc, Nt) — discard unsampled zeros
+    # Flatten k-space to (Nsamples, Nvc, Nt) — discard unsampled zeros.
+    # Ω_idx is GPU-resident when use_gpu=true, avoiding scalar indexing on CuArrays.
     ksp_flat = reshape(ksp0_gpu, :, Nvc, Nt)
     ksp = cat([ksp_flat[vec(s), :, it]
-               for (it, s) in enumerate(eachslice(Ω; dims=4))]...; dims=3)
+               for (it, s) in enumerate(eachslice(Ω_idx; dims=4))]...; dims=3)
     println("  k-space shape after masking: ", size(ksp))
+
+    # ksp0_gpu is no longer needed — drop the reference and reclaim VRAM.
+    # For a (90,90,60,21,387) ComplexF32 volume this frees ~30 GB.
+    ksp0_gpu = nothing; ksp_flat = nothing; ksp0 = nothing
+    if use_gpu
+        GC.gc(true); CUDA.reclaim()
+        println("  VRAM after freeing ksp0_gpu: free=",
+                round(CUDA.available_memory()/1e9; digits=2), " GB")
+    end
 
 
     # ── 7. Lipschitz constant ─────────────────────────────────────────────────
@@ -161,7 +175,7 @@ function run_recon(;
 
     # ── 8. Regularisation weights (Ong & Lustig 2016) ─────────────────────────
     N_voxels = prod(N)
-    λs = [
+    λs = Float32[
         sqrt(prod(PATCH_SIZES[k])) +
         sqrt(Nt) +
         sqrt(log(N_voxels * Nt / max(prod(PATCH_SIZES[k]), Nt)))
@@ -190,20 +204,18 @@ function run_recon(;
         )
     end
 
-    # Select patch proximal operator based on backend
-    _patch_svst = use_gpu ? patchSVST_gpu : patchSVST
-
+    # patchSVST dispatches on CuArray vs Array automatically via src/recon.jl
     g_prox = (X, c) -> begin
+        # Force GC before the first scale's patch-tensor allocation to free any
+        # lingering gradient intermediates from dc_cost_grad (image_sum, Ax, residual, g
+        # each up to 4.9 GB on GPU but not collected promptly by the GC).
+        use_gpu && (GC.gc(true); CUDA.reclaim())
         for k in 1:Nscales
-            @views X[:, :, :, :, k] = _patch_svst(
+            @views X[:, :, :, :, k] = patchSVST(
                 X[:, :, :, :, k], c * λs[k], PATCH_SIZES[k], STRIDES[k])
         end
         return X
     end
-
-    comp_cost = X -> dc_cost(X) + reg_cost(X)
-    logger    = (iter, xk, yk, is_restart) -> (dc_cost(xk), reg_cost(xk), is_restart)
-
 
     # ── 10. Initialise X ──────────────────────────────────────────────────────
     if use_gpu
@@ -212,13 +224,29 @@ function run_recon(;
         X0 = zeros(ComplexF32, Nx, Ny, Nz, Nt, Nscales)
     end
     X0[:, :, :, :, 1] = A' * ksp
+    # A'*ksp leaves block-adjoint intermediates (one per time frame) GC-eligible but not yet
+    # collected. Reclaim now so they don't inflate VRAM headroom during POGM.
+    use_gpu && (GC.gc(true); CUDA.reclaim())
 
 
     # ── 11. POGM ──────────────────────────────────────────────────────────────
+    # Gradient restart (:gr) decides restarts from gradient direction, not Fcost values,
+    # so passing dc_cost as Fcost avoids expensive nuclear-norm computation inside POGM.
+    # reg_cost (nuclear norm) is skipped in the GPU logger: transferring patch tensors to
+    # CPU for svdvals at every iteration would stall the reconstruction.
     backend_str = use_gpu ? "GPU" : "CPU"
+    if use_gpu
+        free_b, total_b = CUDA.available_memory(), CUDA.total_memory()
+        println("  VRAM before POGM: free=", round(free_b/1e9; digits=2),
+                " GB / total=", round(total_b/1e9; digits=2), " GB")
+    end
     println("\nRunning POGM ($NITERS iterations, $Nscales scale(s), $backend_str) …")
+    logger = (iter, xk, yk, is_restart) -> begin
+        rc = use_gpu ? 0f0 : reg_cost(xk)
+        (dc_cost(xk), rc, is_restart)
+    end
     X, costs = pogm_mod(
-        X0, comp_cost, dc_cost_grad, L;
+        X0, dc_cost, dc_cost_grad, L;
         mom    = :pogm,
         niter  = NITERS,
         g_prox = g_prox,
@@ -240,6 +268,7 @@ function run_recon(;
 
     # ── 12. Save ──────────────────────────────────────────────────────────────
     fn_out = fn_recon_base * "_$(Nscales)scales.mat"
+    mkpath(dirname(fn_out))
     matwrite(fn_out, Dict(
         "X"            => X,
         "X_recon"      => X_recon,

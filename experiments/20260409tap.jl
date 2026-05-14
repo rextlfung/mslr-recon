@@ -23,16 +23,16 @@ Revise.includet(joinpath(@__DIR__, "..", "scripts", "reconstruct.jl"))
 using .Reconstruct
 
 run_recon(
-    fn_ksp          = "/StorageRAID/rexfung/20260409tap/recon/pd_epi_zf.mat",
+    fn_ksp          = "/StorageRAID/rexfung/20260409tap/recon/caipi_ts_epi_zf.mat",
     fn_smaps        = "/StorageRAID/rexfung/20260409tap/recon/smaps_bart.mat",
-    fn_recon_base   = "/StorageRAID/rexfung/20260409tap/recon/mslr/pd_recon",
+    fn_recon_base   = "/StorageRAID/rexfung/20260409tap/recon/mslr/caipi_ts_recon",
     N               = (90, 90, 60),
     Nvc             = 21,
     Nt              = 387,
     FOV             = (216mm, 216mm, 144mm),
-    PATCH_SIZES     = [[90, 90, 60],[6, 6, 6], [1, 1, 1]],
-    STRIDES         = [[90, 90, 60],[3, 3, 3], [1, 1, 1]],   # half-overlapping
+    PATCH_SIZES     = [[90, 90, 60], [1, 1, 1]],
+    STRIDES         = [[90, 90, 60], [1, 1, 1]],   # half-overlapping
     NITERS          = 200,
     σ1A_PRECOMPUTED = 1.0,
-    use_gpu         = false,    # ← set false for CPU
+    use_gpu         = true,    # ← set false for CPU
 )
