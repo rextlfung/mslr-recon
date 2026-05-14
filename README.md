@@ -59,7 +59,8 @@ mslr-recon/
 └── experiments/
     ├── 20241017tap.jl        # Finger-tapping, 10 coils, Nt=300
     ├── 20251106balltap.jl    # Ball phantom + finger-tapping, 18 coils, Nt=300
-    └── 20260317tap.jl        # Finger-tapping, 18 coils, Nt=387, half-overlapping patches
+    ├── 20260317tap.jl        # Finger-tapping, 18 coils, Nt=387, half-overlapping patches
+    └── 20260409tap.jl        # Finger-tapping, 21 coils, Nt=387, 2-scale
 ```
 
 ---
@@ -85,8 +86,8 @@ julia --project=. -e 'using Pkg; Pkg.instantiate()'
 Copy an existing experiment file, update the paths and scan parameters, and run:
 
 ```bash
-cp experiments/20251106_balltap.jl experiments/my_experiment.jl
-# edit my_experiment.jl — set paths, N, Nvc, Nt, FOV, and use_gpu
+cp experiments/20251106balltap.jl experiments/my_experiment.jl
+# edit my_experiment.jl — set paths and use_gpu
 ```
 
 **CPU** (multi-threaded patch SVDs):
@@ -122,7 +123,6 @@ Each experiment file calls `run_recon(; ...)` with keyword arguments. Here is a 
 ```julia
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
-using Unitful: mm
 
 using Revise
 Revise.includet(joinpath(@__DIR__, "..", "scripts", "reconstruct.jl"))
@@ -132,12 +132,6 @@ run_recon(
     fn_ksp          = "/data/my_experiment/kspace.mat",
     fn_smaps        = "/data/my_experiment/smaps_bart.mat",
     fn_recon_base   = "/data/my_experiment/recon",
-    N               = (90, 90, 60),       # image matrix (Nx, Ny, Nz)
-    Nvc             = 18,                 # virtual coils after BART compression
-    Nt              = 300,                # number of time frames
-    FOV             = (216mm, 216mm, 144mm),
-    N_gre           = (108, 108, 108),    # GRE reference matrix (for smap cropping)
-    FOV_gre         = (216mm, 216mm, 216mm),
     PATCH_SIZES     = [[90,90,60], [10,10,10]],   # one component per scale
     STRIDES         = [[90,90,60], [10,10,10]],   # non-overlapping
     NITERS          = 50,
@@ -145,6 +139,8 @@ run_recon(
     use_gpu         = true,              # false for CPU
 )
 ```
+
+Image dimensions (`Nx`, `Ny`, `Nz`), number of coils (`Nvc`), and number of frames (`Nt`) are inferred automatically from the k-space file. The sensitivity maps must match the k-space spatial dimensions and coil count — an assertion fires at load time if they don't.
 
 ### Patch schedule guide
 

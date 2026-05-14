@@ -4,7 +4,7 @@ Multi-scale Locally Low-Rank (MSLR) fMRI Reconstruction via Decomposition.
 
 Defines module Reconstruct with a single entry point:
 
-    run_recon(; fn_ksp, fn_smaps, fn_recon_base, N, Nvc, Nt, FOV,
+    run_recon(; fn_ksp, fn_smaps, fn_recon_base,
                 PATCH_SIZES, STRIDES, NITERS,
                 σ1A_PRECOMPUTED, use_gpu=false)
 
@@ -36,7 +36,6 @@ using LinearMapsAA: block_diag, undim
 using MIRT: Asense
 using Statistics, StatsBase
 using MAT, HDF5
-using Unitful: mm
 
 include(joinpath(@__DIR__, "..", "src", "recon.jl"))
 include(joinpath(@__DIR__, "..", "src", "analysis.jl"))
@@ -61,10 +60,6 @@ function run_recon(;
     fn_ksp::String,
     fn_smaps::String,
     fn_recon_base::String,
-    N::Tuple{Int,Int,Int},
-    Nvc::Int,
-    Nt::Int,
-    FOV::Tuple,
     PATCH_SIZES::Vector,
     STRIDES::Vector,
     NITERS::Int,
@@ -81,8 +76,7 @@ function run_recon(;
                 round(CUDA.total_memory()     / 1e9; digits=1), " GB total")
     end
 
-    Nx, Ny, Nz = N
-    Nscales    = length(PATCH_SIZES)
+    Nscales = length(PATCH_SIZES)
 
     # ── 1. Sensitivity maps: load, cast, normalise ───────────────────────────
     println("Loading sensitivity maps …")
@@ -95,7 +89,8 @@ function run_recon(;
     println("Loading k-space …")
     ksp0 = h5read(fn_ksp, "ksp_epi_zf")
     ksp0 = ComplexF32.([complex(k.real, k.imag) for k in ksp0])
-    @assert size(ksp0) == (Nx, Ny, Nz, Nvc, Nt) "Unexpected k-space shape: $(size(ksp0))"
+    Nx, Ny, Nz, Nvc, Nt = size(ksp0)
+    @assert size(smaps_cpu) == (Nx, Ny, Nz, Nvc) "smaps shape $(size(smaps_cpu)) doesn't match k-space dims ($Nx,$Ny,$Nz,$Nvc)"
 
 
     # ── 3. Normalise k-space ──────────────────────────────────────────────────
@@ -108,7 +103,7 @@ function run_recon(;
 
     # ── 4. Sampling mask and validation ───────────────────────────────────────
     Ω = (ksp0[:, :, :, 1, :] .!= 0)
-    R = prod(N) / sum(Ω[:, :, :, 1])
+    R = (Nx * Ny * Nz) / sum(Ω[:, :, :, 1])
     println("Acceleration factor R ≈ ", round(R; digits=2))
 
     for ic in 2:Nvc
@@ -174,7 +169,7 @@ function run_recon(;
 
 
     # ── 8. Regularisation weights (Ong & Lustig 2016) ─────────────────────────
-    N_voxels = prod(N)
+    N_voxels = Nx * Ny * Nz
     λs = Float32[
         sqrt(prod(PATCH_SIZES[k])) +
         sqrt(Nt) +

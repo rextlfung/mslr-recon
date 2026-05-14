@@ -15,8 +15,6 @@ Set use_gpu = true / false below, then run:
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
 
-using Unitful: mm
-
 using Revise
 Revise.includet(joinpath(@__DIR__, "..", "scripts", "reconstruct.jl"))
 using .Reconstruct
@@ -25,10 +23,6 @@ run_recon(
     fn_ksp          = "/mnt/storage/rexfung/20241017tap/rand6x.mat",
     fn_smaps        = "/mnt/storage/rexfung/20241017tap/smaps_bart.mat",
     fn_recon_base   = "/mnt/storage/rexfung/20241017tap/recon",
-    N               = (90, 90, 60),
-    Nvc             = 10,
-    Nt              = 300,
-    FOV             = (216mm, 216mm, 144mm),
     PATCH_SIZES     = [[90, 90, 60], [30, 30, 30], [10, 10, 10]],
     STRIDES         = [[90, 90, 60], [30, 30, 30], [10, 10, 10]],
     NITERS          = 50,
