@@ -8,7 +8,7 @@ Post-reconstruction analysis utilities.
 
 Contents:
   - tSNR map computation
-  - Optimisation convergence plotting
+  - Optimization convergence plotting
 
 Rex Fung, University of Michigan
 =#
@@ -43,7 +43,7 @@ end
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Optimisation convergence plot
+# Optimization convergence plot
 # ──────────────────────────────────────────────────────────────────────────────
 
 """
@@ -74,12 +74,12 @@ function plotOpt(
         label   = "Data Consistency",
         xlabel  = "Iteration",
         ylabel  = "Cost",
-        title   = "POGM Optimisation Convergence",
+        title   = "POGM Optimization Convergence",
         lw      = 2,
         legend  = :topright,
         size    = plot_size)
 
-    plot!(plt, iters, reg_costs;  label = "Regulariser", lw = 2)
+    plot!(plt, iters, reg_costs;  label = "Regularizer", lw = 2)
     plot!(plt, iters, dc_costs .+ reg_costs;
         label     = "Total Cost",
         lw        = 2,

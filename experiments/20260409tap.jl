@@ -21,17 +21,17 @@ Revise.includet(joinpath(@__DIR__, "..", "scripts", "reconstruct.jl"))
 Revise.includet(joinpath(@__DIR__, "..", "scripts", "analyze.jl"))
 using .Reconstruct
 
-fn_out = "/StorageRAID/rexfung/20260409tap/recon/mslr/pd_recon_2scales.mat"
+fn_out = "/StorageRAID/rexfung/20260409tap/recon/mslr/caipi_recon_2scales.mat"
 
 if !isfile(fn_out)
     fn_out = run_recon(
-        fn_ksp          = "/StorageRAID/rexfung/20260409tap/recon/pd_epi_zf.mat",
+        fn_ksp          = "/StorageRAID/rexfung/20260409tap/recon/caipi_epi_zf.mat",
         fn_smaps        = "/StorageRAID/rexfung/20260409tap/recon/smaps_bart.mat",
-        fn_recon_base   = "/StorageRAID/rexfung/20260409tap/recon/mslr/pd_recon",
+        fn_recon_base   = "/StorageRAID/rexfung/20260409tap/recon/mslr/caipi_recon",
         PATCH_SIZES     = [[90, 90, 60], [6, 6, 6]],
         STRIDES         = [[90, 90, 60], [3, 3, 3]],
         NITERS          = 100,
-        σ1A_PRECOMPUTED = 1.0,
+        σ1A_PRECOMPUTED = 0.968294, # measured via scripts/verify_sigma1A.jl
         use_gpu         = true,
         mom             = :pogm, # :pogm, :fpgm, :pgm 
     )

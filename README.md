@@ -113,6 +113,8 @@ Optional flags:
 --no-components     # skip per-scale component images
 ```
 
+All plots are saved as PNGs to `plots/` (created automatically) with a filename prefix matching the input `.mat` basename (e.g. `plots/caipi_recon_2scales_tsnr.png`).
+
 ---
 
 ## Writing an experiment file
@@ -169,7 +171,7 @@ When `use_gpu = true`, the reconstruction:
 - Runs patch SVDs sequentially via CUSOLVER instead of multi-threaded LAPACK
 - Brings results back to CPU before saving
 
-The GPU operator `Asense_gpu` uses the same FFT convention and normalization as `MIRT.Asense` with `fft_forward=true, unitary=true`, giving $\sigma_1(\mathcal{A}) \approx 1$.
+The GPU operator `Asense_gpu` uses the same FFT convention and normalization as `MIRT.Asense` with `fft_forward=true, unitary=true`, giving $\sigma_1(\mathcal{A}) \leq 1$ (exactly 1 for the fully-sampled operator; slightly less under subsampling).
 
 **Memory requirements**
 
@@ -228,7 +230,7 @@ Zero entries in the k-space file are treated as unsampled. The sampling mask is 
 
 **λ is automatic.** The Ong & Lustig formula calibrates thresholds from patch geometry and Nt. It works correctly as long as k-space is normalized, which the reconstruction does internally (using the 99th-percentile image intensity).
 
-**Lipschitz constant.** `σ₁(A) ≈ 1.0` for a unitary FFT-based SENSE operator. Set `σ1A_PRECOMPUTED = nothing` on the first run to compute it via power iteration (~20 min), then hard-code the printed value for future runs on the same acquisition geometry.
+**Lipschitz constant.** `σ₁(A) ≤ 1.0` always — the unsubsampled operator is exactly unitary but subsampling reduces the spectral norm slightly (empirically `σ₁(A) ≈ 0.968` for the 20260409tap dataset). Set `σ1A_PRECOMPUTED = nothing` on the first run to measure it via power iteration (~20 min via `scripts/verify_sigma1A.jl`), then hard-code the result. Using `1.0` is safe (conservative step size) but ~6.7% suboptimal.
 
 **Memory.** If VRAM is tight, reduce `Nscales` (each scale adds `N_opt × Nx·Ny·Nz·Nt × 8 B` to the optimizer buffer, where `N_opt` is 6 for `:fpgm`, 9 for `:pogm`) or reduce `Nvc` at the BART sensitivity-map compression step. The k-space term `3 × |ksp|` is fixed regardless of `Nscales` or `mom`. Switch to `use_gpu = false` to use RAM instead of VRAM; set `-t auto` to use all CPU threads for the patch SVDs.
 
