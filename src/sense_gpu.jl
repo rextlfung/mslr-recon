@@ -14,7 +14,7 @@ because the implementations in src/recon.jl already dispatch correctly for CuArr
   - SVST uses a full matrix multiply for AbstractArray (avoids findall on GPU).
 
 The Asense_gpu operator uses the same fftshift/scale convention as MIRT.Asense
-with fft_forward=true, unitary=true, giving σ₁(A) ≈ 1.0 for normalised smaps.
+with fft_forward=true, unitary=true, giving σ₁(A) ≈ 1.0 for normalized smaps.
 
 Rex Fung, University of Michigan
 =#
@@ -72,6 +72,11 @@ function Asense_gpu(samp::AbstractArray{Bool}, smaps::CuArray;
     # Int32 saves GPU memory vs Int64.
     idx = CuArray(Int32.(findall(vec(samp))))
 
+    # The adjoint of (scale * fft) is (N * scale * ifft), not (scale * ifft).
+    # Julia's fft is the unnormalized DFT; its Hermitian adjoint is N * ifft.
+    # So adjoint scale = prod(N) * scale = prod(N)/sqrt(prod(N)) = sqrt(prod(N)).
+    adj_scale = Float32(prod(N)) * scale
+
     # ── Forward: image (N...) → sampled k-space (K, Nc) ─────────────────────
     function fwd(x_vec::AbstractArray)
         x  = reshape(CuVector{ComplexF32}(vec(x_vec)), N...)   # (Nx, Ny, Nz)
@@ -95,9 +100,9 @@ function Asense_gpu(samp::AbstractArray{Bool}, smaps::CuArray;
         kc_full = reshape(kc_full, N..., Nc)               # (Nx, Ny, Nz, Nc)
 
         if fft_forward
-            xc = scale .* ifftshift(ifft(fftshift(kc_full, D), D), D)
+            xc = adj_scale .* ifftshift(ifft(fftshift(kc_full, D), D), D)
         else
-            xc = scale .* ifftshift(fft(fftshift(kc_full, D), D), D)
+            xc = adj_scale .* ifftshift(fft(fftshift(kc_full, D), D), D)
         end
 
         # SENSE combination: sum over coils with conjugate smaps

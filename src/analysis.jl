@@ -1,6 +1,6 @@
 module Analysis
 
-export tSNR, plotOpt, detrend!
+export tSNR, plotOpt
 
 #=
 analysis.jl
@@ -9,13 +9,11 @@ Post-reconstruction analysis utilities.
 Contents:
   - tSNR map computation
   - Optimisation convergence plotting
-  - Linear drift detrending
 
 Rex Fung, University of Michigan
 =#
 
 using Statistics: mean, std
-using LinearAlgebra: pinv
 using Plots
 using LaTeXStrings
 
@@ -51,12 +49,12 @@ end
 """
     plotOpt(dc_costs, reg_costs, restarts; logscale=false)
 
-Plot POGM optimisation progress: data-consistency cost, regularisation cost,
+Plot POGM optimization progress: data-consistency cost, regularization cost,
 total cost, and restart events.
 
 # Arguments
 - `dc_costs`:  data-consistency term per iteration (length `Niters+1`)
-- `reg_costs`: regularisation term per iteration
+- `reg_costs`: regularization term per iteration
 - `restarts`:  boolean vector; `true` indicates a momentum restart at that iteration
 
 # Keyword arguments
@@ -66,7 +64,8 @@ function plotOpt(
     dc_costs::Vector,
     reg_costs::Vector,
     restarts::AbstractVector;
-    logscale::Bool = false,
+    logscale::Bool   = false,
+    plot_size::Tuple = (900, 500),
 )
     Niters = length(dc_costs) - 1
     iters  = 0:Niters
@@ -77,7 +76,8 @@ function plotOpt(
         ylabel  = "Cost",
         title   = "POGM Optimisation Convergence",
         lw      = 2,
-        legend  = :topright)
+        legend  = :topright,
+        size    = plot_size)
 
     plot!(plt, iters, reg_costs;  label = "Regulariser", lw = 2)
     plot!(plt, iters, dc_costs .+ reg_costs;
@@ -100,35 +100,8 @@ function plotOpt(
         ylabel!("Cost (log-scale)")
     end
 
-    display(plt)
     return plt
 end
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Detrending
-# ──────────────────────────────────────────────────────────────────────────────
-
-"""
-    detrend!(img)
-
-Remove voxel-wise linear drift from a 4-D complex image time series in-place.
-A least-squares line is fit to the time course of each voxel and the linear
-component is subtracted (the mean is preserved).
-
-# Arguments
-- `img`: 4-D array of size `(Nx, Ny, Nz, Nt)`
-"""
-function detrend!(img::AbstractArray{<:Complex})
-    Nx, Ny, Nz, Nt = size(img)
-    M    = [ones(Nt)  collect(1:Nt)]   # design matrix (intercept + linear ramp)
-    Mpinv = pinv(M)
-
-    for i in 1:Nx, j in 1:Ny, k in 1:Nz
-        β = Mpinv * vec(img[i, j, k, :])
-        img[i, j, k, :] .-= M[:, 2] .* β[2]  # subtract only the linear component
-    end
-    return img
-end
 
 end # module Analysis

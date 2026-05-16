@@ -2,7 +2,7 @@
 
 **Multi-scale Low-Rank (MSLR) Reconstruction in Julia**
 
-Iterative reconstruction of 3D + time MRI data. Uses a SENSE forward model and a **multi-scale low-rank decomposition** regularizer optimized with POGM (Proximal Optimized Gradient Method). Supports both CPU (multi-threaded) and GPU (CUDA) execution.
+Iterative reconstruction of 3D + time MRI data. Uses a SENSE forward model and a **multi-scale low-rank decomposition** regularizer optimized with a proximal gradient method (FPGM by default, POGM available). Supports both CPU (multi-threaded) and GPU (CUDA) execution.
 
 ---
 
@@ -37,7 +37,7 @@ $$\lambda_k = \sqrt{p_k} + \sqrt{N_t} + \sqrt{\log\!\left(\frac{N_{vox} \cdot N_
 
 where $p_k$ is the number of voxels in a patch at scale $k$.
 
-Optimization uses **POGM** (Proximal Optimized Gradient Method) with gradient restart. The Lipschitz constant is $L = N_{scales} \cdot \sigma_1(\mathcal{A})^2$.
+Optimization uses `pogm_restart` (from `src/mirt_mod.jl`) with gradient restart. The momentum scheme is configurable via the `mom` parameter (`:fpgm` default, `:pogm` for the Proximal Optimized Gradient Method, `:pgm` for plain gradient descent). The Lipschitz constant is $L = N_{scales} \cdot \sigma_1(\mathcal{A})^2$.
 
 ---
 
@@ -49,12 +49,12 @@ mslr-recon/
 │
 ├── src/
 │   ├── recon.jl              # Patch extraction/recombination, SVST, k-space utilities
-│   ├── analysis.jl           # tSNR maps, convergence plots, detrending
+│   ├── analysis.jl           # tSNR maps, convergence plots
 │   └── sense_gpu.jl          # GPU-native SENSE operator (requires CUDA.jl)
 │
 ├── scripts/
 │   ├── reconstruct.jl        # Reconstruction module — called by experiment files
-│   └── analyze.jl            # Post-reconstruction analysis and visualisation
+│   └── analyze.jl            # Post-reconstruction analysis and visualization
 │
 └── experiments/
     ├── 20241017tap.jl        # Finger-tapping, 10 coils, Nt=300
@@ -110,8 +110,7 @@ julia scripts/analyze.jl /path/to/recon_3scales.mat
 
 Optional flags:
 ```bash
---no-detrend        # skip linear drift removal before tSNR computation
---show-components   # display each scale component individually
+--no-components     # skip per-scale component images
 ```
 
 ---
@@ -137,6 +136,8 @@ run_recon(
     NITERS          = 50,
     σ1A_PRECOMPUTED = 1.0,               # set to `nothing` to compute via power iteration
     use_gpu         = true,              # false for CPU
+    mom             = :fpgm,            # :fpgm (default), :pogm, or :pgm
+    conv_tol        = 1e-4,             # early stopping threshold; 0 to disable
 )
 ```
 
@@ -175,22 +176,22 @@ The GPU operator `Asense_gpu` uses the same FFT convention and normalization as 
 Peak VRAM is set by three terms that are simultaneously live:
 
 ```
-peak ≈ 9 × |X| + |img| + 3 × |ksp| + persistent
+peak ≈ N_opt × |X| + |img| + 3 × |ksp| + persistent
 ```
 
-where `|X| = Nx·Ny·Nz·Nt·Nscales × 8 B` (the full reconstruction tensor), `|img| = |X|/Nscales` (gradient transient), `|ksp| = (Nx·Ny·Nz/R)·Nvc·Nt × 8 B` (k-space appears 3×: 1 stored + 2 `dc_cost` transients), and `persistent` covers smaps, the sampling mask, and small index arrays. The factor of 9 comes from POGM holding nine simultaneous copies of X; use 6 for FISTA or 5 for ISTA.
+where `|X| = Nx·Ny·Nz·Nt·Nscales × 8 B` (the full reconstruction tensor), `|img| = |X|/Nscales` (gradient transient), `|ksp| = (Nx·Ny·Nz/R)·Nvc·Nt × 8 B` (k-space appears 3×: 1 stored + 2 `dc_cost` transients), and `persistent` covers smaps, the sampling mask, and small index arrays. `N_opt` depends on `mom`: 6 for `:fpgm` (default), 9 for `:pogm`, 5 for `:pgm`.
 
-**Worked example** — N=90×90×60, Nt=387, Nvc=21, R=6, Nscales=2:
+**Worked example** — N=90×90×60, Nt=387, Nvc=21, R=6, Nscales=2, `mom=:fpgm` (default):
 
 | Term | Size |
 |:-----|-----:|
-| 9 × \|X\| (POGM buffers) | 27.1 GB |
+| 6 × \|X\| (FPGM buffers) | 18.1 GB |
 | \|img\| (gradient transient) | 1.5 GB |
 | 3 × \|ksp\| (k-space terms) | 15.8 GB |
 | persistent (smaps + Ω + idx) | 0.5 GB |
-| **Total** | **~44.8 GB** |
+| **Total** | **~35.9 GB** |
 
-Observed peak on RTX A6000 (50.9 GB VRAM): ~44 GB ✓
+With `mom=:pogm` the buffer term rises to 9 × \|X\| ≈ 27.1 GB, giving ~44.9 GB total.
 
 Note that `|ksp|` does not scale with `Nscales` — adding more scales raises only the POGM buffer term. For high Nvc or long Nt, the k-space terms can dominate. The same formula applies to CPU RAM (see `CLAUDE.md` for minor CPU/GPU differences); RAM is rarely the binding constraint.
 
@@ -229,9 +230,9 @@ Zero entries in the k-space file are treated as unsampled. The sampling mask is 
 
 **Lipschitz constant.** `σ₁(A) ≈ 1.0` for a unitary FFT-based SENSE operator. Set `σ1A_PRECOMPUTED = nothing` on the first run to compute it via power iteration (~20 min), then hard-code the printed value for future runs on the same acquisition geometry.
 
-**Memory.** If VRAM is tight, reduce `Nscales` (each scale adds `9 × Nx·Ny·Nz·Nt × 8 B` to the POGM buffer term) or reduce `Nvc` at the BART sensitivity-map compression step. The k-space term `3 × |ksp|` is fixed regardless of `Nscales`. Switch to `use_gpu = false` to use RAM instead of VRAM; set `-t auto` to use all CPU threads for the patch SVDs.
+**Memory.** If VRAM is tight, reduce `Nscales` (each scale adds `N_opt × Nx·Ny·Nz·Nt × 8 B` to the optimizer buffer, where `N_opt` is 6 for `:fpgm`, 9 for `:pogm`) or reduce `Nvc` at the BART sensitivity-map compression step. The k-space term `3 × |ksp|` is fixed regardless of `Nscales` or `mom`. Switch to `use_gpu = false` to use RAM instead of VRAM; set `-t auto` to use all CPU threads for the patch SVDs.
 
-**Convergence.** 50 iterations is typically sufficient. Watch the convergence plot from `analyze.jl` — if the total cost is still dropping steeply at the end, increase `NITERS`.
+**Convergence.** Early stopping is on by default (`conv_tol=1e-4`): the run halts once the relative change in data-consistency cost `|ΔF/F|` drops below the threshold, with a 10-iteration warmup before checks begin. Set `conv_tol=0` to disable and always run all `NITERS` iterations. If the cost plot from `analyze.jl` shows stopping too early or too late, adjust `conv_tol` in the experiment file.
 
 **REPL workflow.** Experiment files use `Revise.includet` so you can re-run them in the same REPL session without restarting Julia. Revise also automatically picks up edits to `src/` files while the REPL is open.
 

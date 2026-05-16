@@ -261,6 +261,12 @@ allocation, which can exceed 10 GB for moderate patch sizes on large volumes.
 A 2-D + time variant dispatches on `img::AbstractArray{<:Any,3}` (see below).
 """
 function patchSVST(img::Array{<:Any,4}, β, patch_size, stride_size)
+    Nx, Ny, Nz, _ = size(img)
+    psx, psy, psz = min(patch_size[1], Nx), min(patch_size[2], Ny), min(patch_size[3], Nz)
+    if psx == 1 && psy == 1 && psz == 1
+        norms = sqrt.(sum(abs2, img; dims=4))
+        return img .* max.(1f0 .- Float32(β) ./ norms, 0f0)
+    end
     P  = img2patches(img, patch_size, stride_size)
     Np = size(P, 3)
     _svst_loop!(P, β, Np)
@@ -474,7 +480,7 @@ end
     patchSVST(img, β, patch_size, stride_size) -> img_lr
 
 Patch-wise SVST for 2-D + time data `(Ny, Nz, Nt)`.
-Patches are normalised by their leading singular value before thresholding
+Patches are normalized by their leading singular value before thresholding
 and rescaled afterwards to preserve contrast. Zero patches are skipped.
 Dispatches on `ndims(img) == 3`; see also the 4-D GPU-compatible variant above.
 """

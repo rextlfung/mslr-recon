@@ -6,15 +6,15 @@ Defines module Reconstruct with a single entry point:
 
     run_recon(; fn_ksp, fn_smaps, fn_recon_base,
                 PATCH_SIZES, STRIDES, NITERS,
-                σ1A_PRECOMPUTED, use_gpu=false)
+                σ1A_PRECOMPUTED, use_gpu=false, mom=:fpgm, conv_tol=1e-4)
 
 GPU acceleration (use_gpu=true):
   Requires CUDA.jl (add it with: ] add CUDA)
   - Sensitivity maps, k-space, and the sampling mask are moved to the GPU (CuArray).
   - The SENSE encoding operator A is built with Asense_gpu (cuFFT-based).
-  - The image X lives on GPU during POGM; results are brought back to CPU for saving.
+  - The image X lives on GPU during FISTA; results are brought back to CPU for saving.
   - patchSVST dispatches automatically to sequential CUSOLVER SVDs via Julia type dispatch.
-  - pogm_mod (src/mirt_mod.jl) keeps all scalar momentum coefficients in Float32 to prevent
+  - pogm_restart (src/mirt_mod.jl) keeps all scalar momentum coefficients in Float32 to prevent
     CuArray{ComplexF32} promotion to Float64, which would double VRAM usage.
   - RTX A6000 (48 GB) fits a 3-scale run (~33 GB) comfortably.
 
@@ -64,7 +64,9 @@ function run_recon(;
     STRIDES::Vector,
     NITERS::Int,
     σ1A_PRECOMPUTED::Union{Float64,Nothing},
-    use_gpu::Bool = false,
+    use_gpu::Bool   = false,
+    mom::Symbol     = :fpgm,
+    conv_tol::Float64 = 1e-4,
 )
     # ── GPU sanity check ──────────────────────────────────────────────────────
     if use_gpu
@@ -78,7 +80,7 @@ function run_recon(;
 
     Nscales = length(PATCH_SIZES)
 
-    # ── 1. Sensitivity maps: load, cast, normalise ───────────────────────────
+    # ── 1. Sensitivity maps: load, cast, normalize ───────────────────────────
     println("Loading sensitivity maps …")
     smaps_raw = ComplexF32.(matread(fn_smaps)["smaps"])
     smaps_cpu = smaps_raw ./ (sqrt.(sum(abs2.(smaps_raw); dims=4)) .+ eps(Float32))
@@ -93,7 +95,7 @@ function run_recon(;
     @assert size(smaps_cpu) == (Nx, Ny, Nz, Nvc) "smaps shape $(size(smaps_cpu)) doesn't match k-space dims ($Nx,$Ny,$Nz,$Nvc)"
 
 
-    # ── 3. Normalise k-space ──────────────────────────────────────────────────
+    # ── 3. Normalize k-space ──────────────────────────────────────────────────
     println("Normalising k-space …")
     img0         = sense_comb(ksp0, smaps_cpu)
     scale_factor = quantile(vec(abs.(img0)), 0.99)
@@ -160,7 +162,7 @@ function run_recon(;
     # ── 7. Lipschitz constant ─────────────────────────────────────────────────
     if isnothing(σ1A_PRECOMPUTED)
         println("Computing σ₁(A) via power iteration (may take ~20 min) …")
-        _, σ1A = poweriter_mod(undim(A))
+        _, σ1A = poweriter(undim(A))
         println("  σ₁(A) = ", round(σ1A; digits=4))
     else
         σ1A = σ1A_PRECOMPUTED
@@ -168,15 +170,18 @@ function run_recon(;
     L = Nscales * σ1A^2
 
 
-    # ── 8. Regularisation weights (Ong & Lustig 2016) ─────────────────────────
+    # ── 8. Regularization weights (Ong & Lustig 2016) ─────────────────────────
+    # Formula assumes unit-variance noise in image space. BART prewhitening gives
+    # σ_ksp ≈ 1; after dividing k-space by scale_factor the effective noise is
+    # σ_norm = 1/scale_factor, so λ_k must be scaled down by the same factor.
     N_voxels = Nx * Ny * Nz
     λs = Float32[
         sqrt(prod(PATCH_SIZES[k])) +
         sqrt(Nt) +
         sqrt(log(N_voxels * Nt / max(prod(PATCH_SIZES[k]), Nt)))
         for k in 1:Nscales
-    ]
-    println("Regularisation weights λs = ", round.(λs; digits=3))
+    ] ./ scale_factor
+    println("Regularization weights λs = ", round.(λs; digits=6))
 
 
     # ── 9. Cost functions and proximal operator ───────────────────────────────
@@ -212,7 +217,7 @@ function run_recon(;
         return X
     end
 
-    # ── 10. Initialise X ──────────────────────────────────────────────────────
+    # ── 10. Initialize X ──────────────────────────────────────────────────────
     if use_gpu
         X0 = CUDA.zeros(ComplexF32, Nx, Ny, Nz, Nt, Nscales)
     else
@@ -224,28 +229,31 @@ function run_recon(;
     use_gpu && (GC.gc(true); CUDA.reclaim())
 
 
-    # ── 11. POGM ──────────────────────────────────────────────────────────────
+    # ── 11. FISTA ─────────────────────────────────────────────────────────────
     # Gradient restart (:gr) decides restarts from gradient direction, not Fcost values,
-    # so passing dc_cost as Fcost avoids expensive nuclear-norm computation inside POGM.
-    # reg_cost (nuclear norm) is skipped in the GPU logger: transferring patch tensors to
-    # CPU for svdvals at every iteration would stall the reconstruction.
+    # so passing dc_cost as Fcost avoids expensive nuclear-norm computation each iteration.
+    # reg_cost is always evaluated: on GPU, xk is copied to CPU before calling reg_cost
+    # to keep patch tensors off-device (img2patches on CuArray can exceed 10 GB).
     backend_str = use_gpu ? "GPU" : "CPU"
     if use_gpu
         free_b, total_b = CUDA.available_memory(), CUDA.total_memory()
-        println("  VRAM before POGM: free=", round(free_b/1e9; digits=2),
+        println("  VRAM before FISTA: free=", round(free_b/1e9; digits=2),
                 " GB / total=", round(total_b/1e9; digits=2), " GB")
     end
-    println("\nRunning POGM ($NITERS iterations, $Nscales scale(s), $backend_str) …")
-    logger = (iter, xk, yk, is_restart) -> begin
-        rc = use_gpu ? 0f0 : reg_cost(xk)
-        (dc_cost(xk), rc, is_restart)
+    println("\nIteratively reconstructing ($NITERS iterations, $Nscales scale(s), $backend_str, mom=$mom) …")
+    logger = (_, xk, _, is_restart) -> begin
+        # reg_cost runs on CPU: on GPU, copy xk first to avoid allocating a full
+        # patch tensor on-device (img2patches on a CuArray can exceed 10 GB).
+        xk_cpu = use_gpu ? Array(xk) : xk
+        (dc_cost(xk), reg_cost(xk_cpu), is_restart)
     end
-    X, costs = pogm_mod(
+    X, costs = pogm_restart(
         X0, dc_cost, dc_cost_grad, L;
-        mom    = :pogm,
-        niter  = NITERS,
-        g_prox = g_prox,
-        fun    = logger,
+        mom      = mom,
+        niter    = NITERS,
+        g_prox   = g_prox,
+        fun      = logger,
+        conv_tol = conv_tol,
     )
 
     dc_costs  = [c[1] for c in costs]
@@ -284,6 +292,7 @@ function run_recon(;
     ); compress=true)
 
     println("\n✓ Saved → $fn_out")
+    return fn_out
 end
 
 end # module Reconstruct

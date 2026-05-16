@@ -19,10 +19,10 @@ julia -t auto experiments/<experiment>.jl
 julia experiments/<experiment>.jl
 ```
 
-**Analyse a completed reconstruction:**
+**Analyze a completed reconstruction:**
 ```bash
 julia scripts/analyze.jl /path/to/recon_3scales.mat
-julia scripts/analyze.jl /path/to/recon_3scales.mat --no-detrend --show-components
+julia scripts/analyze.jl /path/to/recon_3scales.mat --no-components
 ```
 
 **REPL workflow with hot-reload (experiment files use `Revise.includet`):**
@@ -66,19 +66,21 @@ The sampling mask `Ω` is moved to GPU (`cu(Ω)`) alongside k-space so that k-sp
 6. Build block-diagonal SENSE operator `A` (one block per time frame).
 7. Flatten and mask k-space to `(K, Nc, Nt)`.
 8. Compute or reuse Lipschitz constant `L = Nscales × σ₁(A)²`.
-9. Compute per-scale regularization weights `λ_k` via the Ong & Lustig formula.
-10. Run POGM (`pogm_mod` from `src/mirt_mod.jl`) with the patch-SVST proximal operator applied independently to each scale component; progress is shown via `@showprogress` inside `pogm_mod`.
+9. Compute per-scale regularization weights `λ_k` via the Ong & Lustig formula, then divide by `scale_factor` to correct for the noise level in the normalized data (BART prewhitening gives σ_ksp ≈ 1; dividing k-space by `scale_factor` makes σ_norm = 1/scale_factor, so λ_k must be scaled down accordingly).
+10. Run `pogm_restart` (from `src/mirt_mod.jl`) with the momentum scheme selected by the `mom` parameter (default `:fpgm`; `:pogm` and `:pgm` also supported) and the patch-SVST proximal operator applied independently to each scale component; progress is shown via `@showprogress` inside `pogm_restart`. Early stopping fires when the relative change in data-consistency cost `|ΔF/F|` falls below `conv_tol` (default `1e-4`) for the first time after iteration 10; set `conv_tol=0` to disable.
 11. Save output as `<fn_recon_base>_<Nscales>scales.mat`.
 
 The reconstruction variable `X` has shape `(Nx, Ny, Nz, Nt, Nscales)`. The cost function operates on `image_sum(X) = sum(X; dims=5)` for data consistency, but the proximal step acts on each scale independently.
 
-### Optimizer — `pogm_mod` + `poweriter_mod` (`src/mirt_mod.jl`)
+### Optimizer — `pogm_restart` + `poweriter` (`src/mirt_mod.jl`)
 
-The reconstruction uses `pogm_mod` and `poweriter_mod` from `src/mirt_mod.jl` — GPU-compatible ports of `MIRT.pogm_restart` and `MIRT.poweriter`. `MIRT.pogm_restart` cannot run on GPU because it allocates gradients with `zeros(size(x0))` (creates a CPU Float64 array), uses Float64 scalar literals that would promote `CuArray{ComplexF32}` to `ComplexF64`, and uses `real(-Fgrad .* ynew_yold)` which allocates large intermediate CuArrays. `mirt_mod.jl` fixes all three, plus uses fused broadcast (`@.`) for the `znew` momentum update and related expressions to eliminate peak intermediate allocations of ~12–17 GB per iteration. Progress display is driven by `@showprogress` inside `pogm_mod`. The `fun` return values `(dc_cost, reg_cost, is_restart)` are collected into the `costs` array and unpacked for saving/plotting.
+The reconstruction uses `pogm_restart` from `src/mirt_mod.jl`. The momentum scheme is selected by `run_recon`'s `mom` parameter (`:fpgm` default, `:pogm`, or `:pgm`). The prox step size is fixed at `α = 1/L` every iteration for `:fpgm`/`:pgm`, giving a fixed SVST threshold of `α × λ_k = λ_k / L`; `:pogm` uses a per-iteration `zetanew`. `poweriter` estimates the Lipschitz constant if not precomputed.
+
+`pogm_restart` is a modified port of `MIRT.pogm_restart`. `MIRT.pogm_restart` cannot run on GPU because it allocates gradients with `zeros(size(x0))` (creates a CPU Float64 array), uses Float64 scalar literals that would promote `CuArray{ComplexF32}` to `ComplexF64`, and uses `real(-Fgrad .* ynew_yold)` which allocates large intermediate CuArrays. `mirt_mod.jl` fixes all three, and additionally adds early stopping via `conv_tol`. Progress display is driven by `@showprogress` inside `pogm_restart`. The `fun` return values `(dc_cost, reg_cost, is_restart)` are collected into the `costs` array and unpacked for saving/plotting.
 
 ### `src/analysis.jl`
 
-Provides `tSNR`, `detrend!`, and `plotOpt`. `detrend!` removes linear temporal drift per voxel in-place before tSNR computation.
+Provides `tSNR` and `plotOpt`.
 
 ## Key implementation details
 
@@ -90,7 +92,7 @@ Provides `tSNR`, `detrend!`, and `plotOpt`. `detrend!` removes linear temporal d
 
 **Peak memory formula (GPU and CPU)**
 
-The dominant terms are the 9 simultaneously-live POGM iteration buffers and the `dc_cost` transients:
+The dominant terms are the simultaneously-live FISTA iteration buffers and the `dc_cost` transients:
 
 ```
 peak = N_opt × |X| + |img| + 3×|ksp| + persistent
@@ -98,22 +100,22 @@ peak = N_opt × |X| + |img| + 3×|ksp| + persistent
 
 | Symbol | Definition | Source |
 |--------|-----------|--------|
-| `\|X\|` | `Nx·Ny·Nz·Nt·Nscales × 8 B` | Full 5-D reconstruction tensor; POGM holds 9 simultaneous copies (xold≡zold, yold, uold, unew, xnew≡znew, ynew, Fgrad, Fgradold, ynew_yold) |
-| `N_opt` | 9 (POGM), 6 (FISTA), 5 (ISTA) | All with gradient restart |
+| `\|X\|` | `Nx·Ny·Nz·Nt·Nscales × 8 B` | Full 5-D reconstruction tensor; FISTA holds 6 simultaneous copies (xold, yold, xnew≡ynew, fgrad, Fgrad, Fgradold) |
+| `N_opt` | 6 (FISTA/FPGM), 9 (POGM), 5 (ISTA) | All with gradient restart |
 | `\|img\|` | `\|X\| / Nscales` | `image_sum(X)` transient inside `dc_cost` |
 | `\|ksp\|` | `K·Nvc·Nt × 8 B`, K = Nx·Ny·Nz/R | `Ax` and `Ax−ksp` briefly coexist during `dc_cost` (×2 transients); plus the stored k-space array (×1 persistent) = ×3 total |
 | `persistent` | smaps + ksp + Ω + idx | smaps: `Nx·Ny·Nz·Nvc×8 B`; Ω: `Nx·Ny·Nz·Nt×1 B`; idx (GPU only): `K·Nt×4 B` |
 
 **Example — 20260409tap** (N=90×90×60, Nt=387, Nvc=21, R≈6, Nscales=2):
 - `|X|` = 3.01 GB, `|img|` = 1.51 GB, `|ksp|` = 5.27 GB, persistent = 5.66 GB
-- peak = 9×3.01 + 1.51 + 3×5.27 + 0.40 = **44.8 GB** (observed ~44 GB ✓)
+- peak = 6×3.01 + 1.51 + 3×5.27 + 0.40 = **35.8 GB** (vs ~44 GB with POGM)
 
-The peak occurs in `mirt_mod.jl` at line 160 (`Fcostnew = Fcost(xnew)`) — `ynew` has just been allocated (line 159) so 9 POGM buffers are live, then `dc_cost` allocates `image_sum + Ax + residual`. Note `|ksp|` is independent of `Nscales`; adding scales raises the POGM buffer term but not the k-space transients.
+The peak occurs during `Fcostnew = Fcost(ynew)` — 6 FISTA buffers are live and `dc_cost` allocates `image_sum + Ax + residual`. Note `|ksp|` is independent of `Nscales`; adding scales raises the optimizer buffer term but not the k-space transients.
 
 **CPU vs GPU** (the formula applies to both VRAM and RAM):
 1. **Forced GC**: `use_gpu && (GC.gc(true); CUDA.reclaim())` fires before each `g_prox` on GPU (reconstruct.jl:212), freeing `dc_cost_grad` temporaries. CPU lacks this; in the worst case, `|img| + 2|ksp|` ≈ 12 GB of temps may linger into `g_prox`, though Julia's allocation-triggered GC usually reclaims them before they accumulate.
 2. **Unit-patch patchSVST** (`[1,1,1]`): GPU dispatches to the vectorized broadcast path (negligible allocation); CPU dispatches to `img2patches`, allocating `|img|` for the full patch tensor during `g_prox`.
-3. **reg_cost logging**: CPU evaluates the full nuclear-norm cost each iteration (patch tensors ≈ `|img|` per scale at logger time); GPU returns 0. Does not raise the peak above the Fcost level.
+3. **reg_cost logging**: Both CPU and GPU evaluate the full nuclear-norm cost each iteration. On GPU, `xk` is copied to CPU before calling `reg_cost` (patch tensors ≈ `|img|` per scale) to keep the large intermediate patch tensor off-device. Does not raise the peak VRAM above the Fcost level.
 4. **idx arrays**: 0.125 GB GPU-only overhead (`Asense_gpu` pre-computes Int32 gather indices; `MIRT.Asense` uses the Bool mask directly).
 5. **Resource type**: VRAM is a hard limit (24–80 GB); RAM is typically 64–512 GB with swap as overflow.
 

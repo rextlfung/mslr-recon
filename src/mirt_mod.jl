@@ -1,17 +1,17 @@
 module MirtMod
 
-export pogm_mod, poweriter_mod
+export pogm_restart, poweriter
 
 #=
 mirt_mod.jl
-GPU-compatible POGM and power iteration.
+Modified POGM and power iteration: GPU-compatible, convergence-detecting, memory-efficient.
 
-pogm_mod is a near-verbatim port of MIRT.pogm_restart (Kim & Fessler, 2017/2018)
-with GPU-compatibility fixes:
+pogm_restart is a modified port of MIRT.pogm_restart (Kim & Fessler, 2017/2018)
+with the following changes:
   1. Scalar momentum coefficients (alpha, beta, gamma, zetanew, etc.) are cast to
      real(eltype(x0)) so that Float64 literals do not promote CuArray{ComplexF32}
      to CuArray{ComplexF64}, which would double memory usage and exhaust VRAM.
-  2. Fgradold is initialised with similar(x0) instead of zeros(size(x0)), keeping
+  2. Fgradold is initialized with similar(x0) instead of zeros(size(x0)), keeping
      the gradient accumulator on the same device as x0.
   3. _gr_restart uses dot() (CUBLAS) instead of real(-Fgrad .* ynew_yold), avoiding
      two large intermediate CuArray allocations per iteration.
@@ -21,10 +21,13 @@ with GPU-compatibility fixes:
   5. Fgrad is pre-allocated and updated in-place; ynew_yold is pre-allocated for
      the _gr_restart call; Fgradold/Fgrad are swapped (not aliased) each iteration.
 
-poweriter_mod wraps MIRT.poweriter, adding a ProgressMeter progress bar.
+  6. Early stopping via conv_tol: halts when relative cost change |ΔF/F| < conv_tol,
+     with a configurable warmup period (conv_min_iter) before checks begin.
+
+poweriter wraps MIRT.poweriter, adding a ProgressMeter progress bar.
 
 Original algorithm: Donghwan Kim & Jeff Fessler, University of Michigan, 2017-2018.
-GPU-compatibility fixes: Rex Fung, University of Michigan, 2025.
+Modified by Rex Fung, University of Michigan, 2025.
 =#
 
 using LinearAlgebra: norm, dot
@@ -47,15 +50,14 @@ end
 # ──────────────────────────────────────────────────────────────────────────────
 
 """
-    x, out = pogm_mod(x0, Fcost, f_grad, f_L; kwargs...)
+    x, out = pogm_restart(x0, Fcost, f_grad, f_L; kwargs...)
 
-Proximal Optimised Gradient Method (POGM) with optional restart.
-GPU-compatible port of `MIRT.pogm_restart`: all scalar momentum coefficients are
-cast to `real(eltype(x0))` to prevent type promotion of CuArrays to Float64.
+Proximal gradient method with optional momentum (`:pgm`, `:fpgm`, `:pogm`) and restart.
+Modified port of `MIRT.pogm_restart`: GPU-compatible, memory-efficient, with early stopping.
 
-Signature identical to `MIRT.pogm_restart`; see that function's docstring for details.
+Signature compatible with `MIRT.pogm_restart`; see that function's docstring for details.
 """
-function pogm_mod(
+function pogm_restart(
     x0,
     Fcost::Function,
     f_grad::Function,
@@ -68,6 +70,8 @@ function pogm_mod(
     niter::Int            = 10,
     g_prox::Function      = (z, c::Real) -> z,
     fun::Function         = (iter, xk, yk, is_restart) -> undef,
+    conv_tol::Real        = 0.,
+    conv_min_iter::Int    = 10,
 )
     mom     ∈ (:pgm, :fpgm, :pogm) || throw(ArgumentError("mom=$mom"))
     restart ∈ (:none, :gr, :fr)    || throw(ArgumentError("restart=$restart"))
@@ -92,6 +96,8 @@ function pogm_mod(
 
     out = Array{Any}(undef, niter + 1)
     out[1] = fun(0, x0, x0, false)
+    Fprev        = Fcostold
+    niter_actual = niter
 
     # xnew and ynew are assigned inside the loop (not pre-allocated):
     # in :pogm, xnew = g_prox(znew,...) and ynew = @. xold - alpha*Fgrad both rebind
@@ -179,13 +185,24 @@ function pogm_mod(
             zetaold = zetanew
         end
 
+        if conv_tol > 0 && iter >= conv_min_iter
+            rel_change = abs(Fcostnew - Fprev) / (abs(Fprev) + eps(T))
+            if rel_change < T(conv_tol)
+                out[iter + 1] = fun(iter, xnew, ynew, is_restart)
+                @info "Converged at iteration $iter (rel. ΔF/F = $(round(rel_change; sigdigits=2)) < $conv_tol)"
+                niter_actual = iter
+                break
+            end
+        end
+        Fprev = Fcostnew
+
         out[iter + 1] = fun(iter, xnew, ynew, is_restart)
         xold = xnew
         yold = ynew
         (mom !== :pgm && iszero(mu)) && (told = tnew)
     end
 
-    return (mom === :pogm ? xnew : ynew), out
+    return (mom === :pogm ? xnew : ynew), out[1:niter_actual+1]
 end
 
 
@@ -194,12 +211,12 @@ end
 # ──────────────────────────────────────────────────────────────────────────────
 
 """
-    x, σ1 = poweriter_mod(A; niter, tol, x0, chat)
+    x, σ1 = poweriter(A; niter, tol, x0, chat)
 
 Estimate the spectral norm `σ1 = ‖A‖₂` via power iteration.
 Wraps `MIRT.poweriter` with a ProgressMeter progress bar.
 """
-function poweriter_mod(
+function poweriter(
     A;
     niter::Int                    = 200,
     tol::Real                     = 1e-6,
