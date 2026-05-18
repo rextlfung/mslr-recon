@@ -60,7 +60,7 @@ mslr-recon/
     ├── 20241017tap.jl        # Finger-tapping, 10 coils, Nt=300
     ├── 20251106balltap.jl    # Ball phantom + finger-tapping, 18 coils, Nt=300
     ├── 20260317tap.jl        # Finger-tapping, 18 coils, Nt=387, half-overlapping patches
-    └── 20260409tap.jl        # Finger-tapping, 21 coils, Nt=387, 2-scale
+    └── 20260409tap.jl        # Finger-tapping, 21 coils, Nt=387, 3-scale, half-overlapping; loops over 3 datasets (caipi, caipi_ts, pd), prints each before reconstructing
 ```
 
 ---

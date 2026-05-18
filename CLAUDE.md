@@ -120,3 +120,5 @@ The peak occurs during `Fcostnew = Fcost(ynew)` — 6 FISTA buffers are live and
 5. **Resource type**: VRAM is a hard limit (24–80 GB); RAM is typically 64–512 GB with swap as overflow.
 
 **Sensitivity map format**: `run_recon` reads the key `"smaps"` (not `"smaps_raw"`) from `fn_smaps`. The file is a `.mat` written by BART after compression to `Nvc` virtual coils.
+
+**Multi-dataset experiment files**: When an experiment loops over multiple datasets (e.g. `20260409tap.jl`), print `"Reconstructing: $(ds.ksp)"` before each `run_recon` call so progress is identifiable in long runs. Skip already-completed outputs with `isfile(fn_out)` before calling `run_recon`.
