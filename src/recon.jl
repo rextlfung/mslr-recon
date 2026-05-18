@@ -149,30 +149,6 @@ function patch_nucnorm(P::AbstractArray)
     return patch_nucnorm(Array(P))
 end
 
-"""
-    patch_nucnorm(P, λs) -> cost
-
-Weighted sum of nuclear norms, one weight per patch.
-
-# Arguments
-- `P`:  3-D patch tensor of size `(space, time, Np)`
-- `λs`: `Np`-vector of per-patch regularization weights
-"""
-function patch_nucnorm(P::Array, λs::Vector)
-    @assert ndims(P) == 3 "P must be (space × time × patches)"
-    Np = size(P, 3)
-    costs = zeros(real(eltype(P)), Np)
-    @threads for ip in 1:Np
-        svs = svdvals(copy(P[:, :, ip]))
-        costs[ip] = svs[1] > 0 ? λs[ip] * sum(svs) : zero(eltype(costs))
-    end
-    return sum(costs)
-end
-
-function patch_nucnorm(P::AbstractArray, λs::Vector)
-    return patch_nucnorm(Array(P), λs)
-end
-
 
 # ============================================================
 # Singular Value Soft-Thresholding (SVST)
@@ -393,13 +369,11 @@ Used for zero-filled or view-shared initialisation (not part of the encoding ope
 """
 function sense_comb(ksp::AbstractArray, smaps::AbstractArray)
     Nx, Ny, Nz, _, Nt = size(ksp)
-    img    = zeros(eltype(ksp), Nx, Ny, Nz, Nt)
-    img_mc = fftshift(ifft(ifftshift(ksp, (1,2,3)), (1, 2, 3)), (1,2,3))
-
+    img   = zeros(eltype(ksp), Nx, Ny, Nz, Nt)
+    denom = dropdims(sum(abs2.(smaps); dims=4); dims=4) .+ eps(Float32)
     for t in 1:Nt
-        num   = sum(conj.(smaps) .* img_mc[:, :, :, :, t]; dims=4)
-        denom = sum(abs2.(smaps); dims=4) .+ eps(Float32)
-        img[:, :, :, t] = dropdims(num ./ denom; dims=4)
+        frame_mc = fftshift(ifft(ifftshift(ksp[:, :, :, :, t], (1,2,3)), (1,2,3)), (1,2,3))
+        img[:, :, :, t] = dropdims(sum(conj.(smaps) .* frame_mc; dims=4); dims=4) ./ denom
     end
     return img
 end

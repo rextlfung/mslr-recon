@@ -69,7 +69,7 @@ function pogm_restart(
     bsig::Real            = 1,
     niter::Int            = 10,
     g_prox::Function      = (z, c::Real) -> z,
-    fun::Function         = (iter, xk, yk, is_restart) -> undef,
+    fun::Function         = (iter, xk, yk, is_restart, Fcostnew) -> undef,
     conv_tol::Real        = 0.,
     conv_min_iter::Int    = 10,
 )
@@ -95,7 +95,8 @@ function pogm_restart(
     Fgradold = fill!(similar(x0), zero(eltype(x0)))
 
     out = Array{Any}(undef, niter + 1)
-    out[1] = fun(0, x0, x0, false)
+    out[1] = fun(0, x0, x0, false, Fcostold)
+    niter == 0 && return x0, out[1:1]
     Fprev        = Fcostold
     niter_actual = niter
 
@@ -160,7 +161,7 @@ function pogm_restart(
             # fgrad is no longer needed; free it before allocating ynew.
             # Without this, fgrad (4.5 GB) + the 8 other live X-shaped buffers exceed 48 GB VRAM.
             fgrad = nothing
-            GC.gc(true)
+            !(x0 isa Array) && GC.gc(true)
             # Allocating (not in-place): yold = ynew at loop end would corrupt in-place ynew next iter.
             ynew    = @. xold - alpha * Fgrad
             Fcostnew = Fcost(xnew)
@@ -188,7 +189,7 @@ function pogm_restart(
         if conv_tol > 0 && iter >= conv_min_iter
             rel_change = abs(Fcostnew - Fprev) / (abs(Fprev) + eps(T))
             if rel_change < T(conv_tol)
-                out[iter + 1] = fun(iter, xnew, ynew, is_restart)
+                out[iter + 1] = fun(iter, xnew, ynew, is_restart, Fcostnew)
                 @info "Converged at iteration $iter (rel. ΔF/F = $(round(rel_change; sigdigits=2)) < $conv_tol)"
                 niter_actual = iter
                 break
@@ -214,7 +215,7 @@ end
     x, σ1 = poweriter(A; niter, tol, x0, chat)
 
 Estimate the spectral norm `σ1 = ‖A‖₂` via power iteration.
-Wraps `MIRT.poweriter` with a ProgressMeter progress bar.
+Standalone power iteration with a ProgressMeter progress bar.
 """
 function poweriter(
     A;

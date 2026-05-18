@@ -241,11 +241,16 @@ function run_recon(;
                 " GB / total=", round(total_b/1e9; digits=2), " GB")
     end
     println("\nIteratively reconstructing ($NITERS iterations, $Nscales scale(s), $backend_str, mom=$mom) …")
-    logger = (_, xk, _, is_restart) -> begin
+    last_reg = Ref(0f0)
+    logger = (iter, xk, _, is_restart, Fcostnew) -> begin
         # reg_cost runs on CPU: on GPU, copy xk first to avoid allocating a full
         # patch tensor on-device (img2patches on a CuArray can exceed 10 GB).
-        xk_cpu = use_gpu ? Array(xk) : xk
-        (dc_cost(xk), reg_cost(xk_cpu), is_restart)
+        # Evaluate every 5 iterations to avoid paying SVD cost each iteration.
+        if iter % 5 == 0
+            xk_cpu = use_gpu ? Array(xk) : xk
+            last_reg[] = reg_cost(xk_cpu)
+        end
+        (Fcostnew, last_reg[], is_restart)
     end
     X, costs = pogm_restart(
         X0, dc_cost, dc_cost_grad, L;

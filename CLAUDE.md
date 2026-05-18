@@ -84,7 +84,7 @@ Provides `tSNR` and `plotOpt`. `analyze.jl` auto-saves all plots as PNGs to `plo
 
 ## Key implementation details
 
-**`σ₁(A) ≤ 1.0`** always (subsampling can only reduce the norm of the unsubsampled unitary operator). The unsubsampled operator is exactly unitary (σ₁ = 1), but subsampling with an incoherent mask reduces it slightly. Empirically, `σ₁(A) ≈ 0.968` for the 20260409tap dataset (measured via `scripts/verify_sigma1A.jl`). Hard-code `σ1A_PRECOMPUTED = 0.968294` after the first run to skip power iteration (~20 min). Using 1.0 is safe (overestimates L, so step size is conservative) but ~6.7% suboptimal.
+**`σ₁(A) ≤ 1.0`** always (subsampling can only reduce the norm of the unsubsampled unitary operator). The unsubsampled operator is exactly unitary (σ₁ = 1), but subsampling with an incoherent mask reduces it slightly. Empirically, `σ₁(A) ≈ 0.968` for the 20260409tap dataset (measured via `tests/sigma1A_test.jl`). Hard-code `σ1A_PRECOMPUTED = 0.968294` after the first run to skip power iteration (~20 min). Using 1.0 is safe (overestimates L, so step size is conservative) but ~6.7% suboptimal.
 
 **Patch boundary handling**: `img2patches` uses `cld` (ceiling division) for step counts and clamps the last patch origin to `Nx - psx + 1`, so the image is always fully covered even when dimensions are not multiples of the stride.
 
