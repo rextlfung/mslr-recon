@@ -91,8 +91,6 @@ function pogm_restart(
     told = T(1);  sig = T(1);  zetaold = T(1)
     xold = x0; yold = x0; uold = x0; zold = x0
     Fcostold = Fcost(x0)
-    # similar(x0) keeps the buffer on the same device as x0 (GPU or CPU)
-    Fgradold = fill!(similar(x0), zero(eltype(x0)))
 
     out = Array{Any}(undef, niter + 1)
     out[1] = fun(0, x0, x0, false, Fcostold)
@@ -104,9 +102,14 @@ function pogm_restart(
     # in :pogm, xnew = g_prox(znew,...) and ynew = @. xold - alpha*Fgrad both rebind
     # immediately, so pre-allocating them would leave 2×4 GB buffers live but unused
     # during g_prox's large patch-tensor allocation, causing OOM on 48 GB GPUs.
+    #
+    # Fgradold and ynew_yold are only read/written inside the :pogm branch (lines 170-181).
+    # For :fpgm/:pgm they alias x0 (already live, zero VRAM overhead) instead of occupying
+    # 2×|x0| ≈ 9 GB of VRAM that would prevent the global-scale SVD from allocating its U.
     local xnew, ynew
     Fgrad     = similar(x0)
-    ynew_yold = similar(x0)
+    Fgradold  = mom === :pogm ? fill!(similar(x0), zero(eltype(x0))) : x0
+    ynew_yold = mom === :pogm ? similar(x0) : x0
 
     @showprogress 1 "Reconstructing via $mom..." for iter in 1:niter
         alpha = (mom === :pgm && mu != 0) ? T(2) / (L + mu) : T(1) / L
@@ -197,7 +200,7 @@ function pogm_restart(
         end
         Fprev = Fcostnew
 
-        out[iter + 1] = fun(iter, xnew, ynew, is_restart)
+        out[iter + 1] = fun(iter, xnew, ynew, is_restart, Fcostnew)
         xold = xnew
         yold = ynew
         (mom !== :pgm && iszero(mu)) && (told = tnew)

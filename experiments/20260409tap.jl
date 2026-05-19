@@ -10,7 +10,7 @@ Set use_gpu = true / false below, then run:
   CPU (multi-threaded):
       julia -t auto experiments/20260409tap.jl
 
-  GPU (recommended — RTX A6000 fits a 3-scale run in ~33 GB VRAM):
+  GPU (recommended — RTX A6000 fits a 3-scale run; see CLAUDE.md for peak VRAM analysis):
       julia experiments/20260409tap.jl
 =#
 
