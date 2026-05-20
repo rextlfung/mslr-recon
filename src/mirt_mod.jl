@@ -21,8 +21,11 @@ with the following changes:
   5. Fgrad is pre-allocated and updated in-place; ynew_yold is pre-allocated for
      the _gr_restart call; Fgradold/Fgrad are swapped (not aliased) each iteration.
 
-  6. Early stopping via conv_tol: halts when relative cost change |ΔF/F| < conv_tol,
-     with a configurable warmup period (conv_min_iter) before checks begin.
+  6. Early stopping via conv_tol: halts when the relative image-iterate change
+     ‖x_new − x_prev‖_F / ‖x_prev‖_F < conv_tol, where x is the proximal-step output
+     (ynew for :fpgm/:pgm, xnew for :pogm). Uses already-live buffers (yold/xold), so
+     no extra |x|-sized allocation is needed beyond one transient for the norm difference.
+     A configurable warmup period (conv_min_iter) must elapse before checks begin.
 
 poweriter wraps MIRT.poweriter, adding a ProgressMeter progress bar.
 
@@ -95,7 +98,6 @@ function pogm_restart(
     out = Array{Any}(undef, niter + 1)
     out[1] = fun(0, x0, x0, false, Fcostold)
     niter == 0 && return x0, out[1:1]
-    Fprev        = Fcostold
     niter_actual = niter
 
     # xnew and ynew are assigned inside the loop (not pre-allocated):
@@ -190,15 +192,20 @@ function pogm_restart(
         end
 
         if conv_tol > 0 && iter >= conv_min_iter
-            rel_change = abs(Fcostnew - Fprev) / (abs(Fprev) + eps(T))
+            # Compare prox outputs across consecutive iterations (not momentum points):
+            #   FPGM/PGM: ynew vs yold   POGM: xnew vs xold
+            # Both reference arrays are already live — no extra |x| buffer needed.
+            # norm(curr - prev) allocates one transient; reclaimed by next iter's forced GC.
+            recon_prev = mom === :pogm ? xold : yold
+            recon_curr = mom === :pogm ? xnew : ynew
+            rel_change = norm(recon_curr - recon_prev) / (norm(recon_prev) + eps(T))
             if rel_change < T(conv_tol)
                 out[iter + 1] = fun(iter, xnew, ynew, is_restart, Fcostnew)
-                @info "Converged at iteration $iter (rel. ΔF/F = $(round(rel_change; sigdigits=2)) < $conv_tol)"
+                @info "Converged at iteration $iter (‖Δx‖/‖x‖ = $(round(rel_change; sigdigits=2)) < $conv_tol)"
                 niter_actual = iter
                 break
             end
         end
-        Fprev = Fcostnew
 
         out[iter + 1] = fun(iter, xnew, ynew, is_restart, Fcostnew)
         xold = xnew

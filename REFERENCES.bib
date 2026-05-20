@@ -1,0 +1,133 @@
+% REFERENCES.bib
+% Academic papers referenced by or relevant to this codebase.
+%
+% Sections:
+%   1. Core algorithm (MSLR)
+%   2. Optimizer
+%   3. Forward model (SENSE / NUFFT)
+%   4. Related fMRI reconstruction work
+%   5. Compressed sensing theory
+
+% ── 1. Core algorithm ─────────────────────────────────────────────────────────
+
+% Multi-scale low-rank decomposition: the main regularizer and the λ_k formula.
+@article{ong2016beyond,
+  author    = {Ong, Frank and Lustig, Michael},
+  title     = {Beyond Low Rank + Sparse: Multiscale Low Rank Matrix Decomposition},
+  journal   = {{IEEE} Journal of Selected Topics in Signal Processing},
+  volume    = {10},
+  number    = {4},
+  pages     = {672--687},
+  year      = {2016},
+  doi       = {10.1109/JSTSP.2016.2545518},
+  note      = {Source of the MSLR regularizer and the theoretically motivated λ_k formula
+               used in reconstruct.jl.},
+}
+
+% ── 2. Optimizer ──────────────────────────────────────────────────────────────
+
+% POGM with adaptive gradient restart: the algorithm implemented in src/mirt_mod.jl.
+@article{kim2018adaptive,
+  author    = {Kim, Donghwan and Fessler, Jeffrey A.},
+  title     = {Adaptive Restart of the Optimized Gradient Method for Convex Optimization},
+  journal   = {Journal of Optimization Theory and Applications},
+  volume    = {178},
+  number    = {1},
+  pages     = {240--263},
+  year      = {2018},
+  doi       = {10.1007/s10957-018-1287-4},
+  note      = {Source of pogm_restart (ported to Julia in src/mirt_mod.jl with GPU and
+               early-stopping extensions). Introduces POGM and the gradient-direction
+               restart heuristic (:gr).},
+}
+
+% FISTA / FPGM: the default momentum scheme (mom=:fpgm).
+@article{beck2009fast,
+  author    = {Beck, Amir and Teboulle, Marc},
+  title     = {A Fast Iterative Shrinkage-Thresholding Algorithm for Linear Inverse Problems},
+  journal   = {{SIAM} Journal on Imaging Sciences},
+  volume    = {2},
+  number    = {1},
+  pages     = {183--202},
+  year      = {2009},
+  doi       = {10.1137/080716542},
+  note      = {FISTA. The FPGM momentum update (mom=:fpgm) is the fixed-step version.},
+}
+
+% ── 3. Forward model ──────────────────────────────────────────────────────────
+
+% SENSE: the parallel-imaging encoding model used for A and A'.
+@article{pruessmann1999sense,
+  author    = {Pruessmann, Klaas P. and Weiger, Markus and Scheidegger, Markus B. and Boesiger, Peter},
+  title     = {{SENSE}: Sensitivity Encoding for Fast {MRI}},
+  journal   = {Magnetic Resonance in Medicine},
+  volume    = {42},
+  number    = {5},
+  pages     = {952--962},
+  year      = {1999},
+  doi       = {10.1002/(SICI)1522-2594(199911)42:5<952::AID-MRM16>3.0.CO;2-S},
+  note      = {The parallel-imaging model underlying MIRT.Asense (CPU) and Asense_gpu (GPU).},
+}
+
+% Min-max NUFFT: used internally by MIRT.Asense for non-Cartesian FFT.
+@article{fessler2003nonuniform,
+  author    = {Fessler, Jeffrey A. and Sutton, Bradley P.},
+  title     = {Nonuniform Fast {Fourier} Transforms Using Min-Max Interpolation},
+  journal   = {{IEEE} Transactions on Signal Processing},
+  volume    = {51},
+  number    = {2},
+  pages     = {560--574},
+  year      = {2003},
+  doi       = {10.1109/TSP.2002.807005},
+  note      = {NUFFT underlying the SENSE operator in MIRT.jl.},
+}
+
+% ── 4. Related fMRI reconstruction work ───────────────────────────────────────
+
+% k-t FASTER: low-rank + temporal subspace constraints for highly undersampled fMRI.
+% Uses a 10^{-4} iterate-difference stopping criterion with a 25-iteration hard cap.
+@article{chiew2015recovering,
+  author    = {Chiew, Mark and Smith, Stephen M. and Koopmans, Peter J. and Graedel,
+               Nadine N. and Blumensath, Thomas and Miller, Karla L.},
+  title     = {Recovering Task {fMRI} Signals from Highly Under-Sampled Data with
+               Low-Rank and Temporal Subspace Constraints},
+  journal   = {{NeuroImage}},
+  volume    = {114},
+  pages     = {98--111},
+  year      = {2015},
+  doi       = {10.1016/j.neuroimage.2015.03.055},
+  note      = {Related fMRI approach. Stopping criterion: iterate difference < 1e-4,
+               max 25 iterations. The field has no strong consensus on outer-loop
+               convergence tolerance; most papers use fixed iteration counts.},
+}
+
+% Dynamic L+S reconstruction using POGM; no explicit outer-loop tolerance reported.
+@article{otazo2015lowrank,
+  author    = {Otazo, Ricardo and Cand\`{e}s, Emmanuel and Sodickson, Daniel K.},
+  title     = {Low-Rank Plus Sparse Matrix Decomposition for Accelerated Dynamic {MRI}
+               with Separation of Background and Dynamic Components},
+  journal   = {Magnetic Resonance in Medicine},
+  volume    = {73},
+  number    = {3},
+  pages     = {1125--1136},
+  year      = {2015},
+  doi       = {10.1002/mrm.25240},
+  note      = {L+S model for dynamic MRI. Reference for POGM/FISTA comparison in the
+               L+S setting (Ong et al., PMC6867710).},
+}
+
+% ── 5. Compressed sensing theory ──────────────────────────────────────────────
+
+% Nuclear norm minimization and Gaussian complexity: theoretical basis for λ_k formula.
+@article{candes2011tight,
+  author    = {Cand\`{e}s, Emmanuel J. and Recht, Benjamin},
+  title     = {Exact Matrix Completion via Convex Optimization},
+  journal   = {Foundations of Computational Mathematics},
+  volume    = {9},
+  number    = {6},
+  pages     = {717--772},
+  year      = {2009},
+  doi       = {10.1007/s10208-009-9045-5},
+  note      = {Nuclear norm as convex relaxation of rank; theoretical foundation for
+               the nuclear-norm regularizer used in patchSVST.},
+}

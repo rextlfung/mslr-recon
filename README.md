@@ -135,11 +135,12 @@ run_recon(
     fn_recon_base   = "/data/my_experiment/recon",
     PATCH_SIZES     = [[90,90,60], [10,10,10]],   # one component per scale
     STRIDES         = [[90,90,60], [10,10,10]],   # non-overlapping
-    NITERS          = 50,
     σ1A_PRECOMPUTED = 1.0,               # set to `nothing` to compute via power iteration
     use_gpu         = true,              # false for CPU
     mom             = :fpgm,            # :fpgm (default), :pogm, or :pgm
-    conv_tol        = 1e-4,             # early stopping threshold; 0 to disable
+    # NITERS and conv_tol have defaults (200 and 1e-5); override if needed:
+    # NITERS          = 200,
+    # conv_tol        = 1e-5,
 )
 ```
 
@@ -234,7 +235,7 @@ Zero entries in the k-space file are treated as unsampled. The sampling mask is 
 
 **Memory.** If VRAM is tight, reduce `Nscales` (each scale adds `N_opt × Nx·Ny·Nz·Nt × 8 B` to the optimizer buffer, where `N_opt` is 6 for `:fpgm`, 9 for `:pogm`) or reduce `Nvc` at the BART sensitivity-map compression step. The k-space term `3 × |ksp|` is fixed regardless of `Nscales` or `mom`. Switch to `use_gpu = false` to use RAM instead of VRAM; set `-t auto` to use all CPU threads for the patch SVDs.
 
-**Convergence.** Early stopping is on by default (`conv_tol=1e-4`): the run halts once the relative change in data-consistency cost `|ΔF/F|` drops below the threshold, with a 10-iteration warmup before checks begin. Set `conv_tol=0` to disable and always run all `NITERS` iterations. If the cost plot from `analyze.jl` shows stopping too early or too late, adjust `conv_tol` in the experiment file.
+**Convergence.** Early stopping fires when the relative image-iterate change `‖x_new − x_prev‖_F / ‖x_prev‖_F` falls below `conv_tol` (default `1e-5`), with a 10-iteration warmup. The iterate compared is the prox-step output (before momentum extrapolation), which is more stable than the momentum point. The default `NITERS=200` acts as a hard cap. Set `conv_tol=0` to always run all iterations. For fMRI, underfitting (stopping too early) is the main risk — aliasing artifacts left by an underconverged reconstruction appear as spurious spatial structure that tSNR cannot detect, since temporally static artifacts do not inflate temporal variance.
 
 **REPL workflow.** Experiment files use `Revise.includet` so you can re-run them in the same REPL session without restarting Julia. Revise also automatically picks up edits to `src/` files while the REPL is open.
 
@@ -242,9 +243,21 @@ Zero entries in the k-space file are treated as unsampled. The sampling mask is 
 
 ## References
 
-Ong, F. & Lustig, M. (2016). Beyond low rank + sparse: Multiscale low rank matrix decomposition. *IEEE Journal of Selected Topics in Signal Processing*, 10(4), 672–687. https://doi.org/10.1109/JSTSP.2016.2545518
+Full BibTeX entries are in [`REFERENCES.bib`](REFERENCES.bib). Key citations:
 
-Kim, D. & Fessler, J.A. (2018). Adaptive restart of the optimized gradient method for convex optimization. *Journal of Optimization Theory and Applications*, 178(1), 240–263. https://doi.org/10.1007/s10957-018-1287-4
+**Core algorithm**
+- Ong & Lustig (2016). Beyond low rank + sparse: Multiscale low rank matrix decomposition. *IEEE J. Sel. Top. Signal Process.*, 10(4), 672–687. https://doi.org/10.1109/JSTSP.2016.2545518 — MSLR regularizer and λ_k formula.
+
+**Optimizer**
+- Kim & Fessler (2018). Adaptive restart of the optimized gradient method for convex optimization. *J. Optim. Theory Appl.*, 178(1), 240–263. https://doi.org/10.1007/s10957-018-1287-4 — POGM with gradient restart; ported in `src/mirt_mod.jl`.
+- Beck & Teboulle (2009). A fast iterative shrinkage-thresholding algorithm. *SIAM J. Imaging Sci.*, 2(1), 183–202. https://doi.org/10.1137/080716542 — FISTA / FPGM (default `mom=:fpgm`).
+
+**Forward model**
+- Pruessmann et al. (1999). SENSE: sensitivity encoding for fast MRI. *Magn. Reson. Med.*, 42(5), 952–962. https://doi.org/10.1002/(SICI)1522-2594(199911)42:5<952::AID-MRM16>3.0.CO;2-S
+- Fessler & Sutton (2003). Nonuniform fast Fourier transforms using min-max interpolation. *IEEE Trans. Signal Process.*, 51(2), 560–574. https://doi.org/10.1109/TSP.2002.807005 — NUFFT underlying `MIRT.Asense`.
+
+**Related fMRI reconstruction**
+- Chiew et al. (2015). Recovering task fMRI signals from highly under-sampled data with low-rank and temporal subspace constraints. *NeuroImage*, 114, 98–111. https://doi.org/10.1016/j.neuroimage.2015.03.055 — k-t FASTER; closest comparable fMRI reconstruction approach.
 
 ---
 

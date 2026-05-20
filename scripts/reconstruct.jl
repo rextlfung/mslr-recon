@@ -5,8 +5,8 @@ Multi-scale Locally Low-Rank (MSLR) fMRI Reconstruction via Decomposition.
 Defines module Reconstruct with a single entry point:
 
     run_recon(; fn_ksp, fn_smaps, fn_recon_base,
-                PATCH_SIZES, STRIDES, NITERS,
-                σ1A_PRECOMPUTED, use_gpu=false, mom=:fpgm, conv_tol=1e-4)
+                PATCH_SIZES, STRIDES, NITERS=200,
+                σ1A_PRECOMPUTED, use_gpu=false, mom=:fpgm, conv_tol=1e-5)
 
 GPU acceleration (use_gpu=true):
   Requires CUDA.jl (add it with: ] add CUDA)
@@ -62,11 +62,11 @@ function run_recon(;
     fn_recon_base::String,
     PATCH_SIZES::Vector,
     STRIDES::Vector,
-    NITERS::Int,
+    NITERS::Int       = 200,
     σ1A_PRECOMPUTED::Union{Float64,Nothing},
-    use_gpu::Bool   = false,
-    mom::Symbol     = :fpgm,
-    conv_tol::Float64 = 1e-4,
+    use_gpu::Bool     = false,
+    mom::Symbol       = :fpgm,
+    conv_tol::Float64 = 1e-5,
 )
     # ── GPU sanity check ──────────────────────────────────────────────────────
     if use_gpu
