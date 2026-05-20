@@ -60,13 +60,12 @@ The sampling mask `Ω` is moved to GPU (`cu(Ω)`) alongside k-space so that k-sp
 
 1. Load and normalize sensitivity maps (L2 norm per voxel across coils).
 2. Load k-space from HDF5-backed `.mat` (key `ksp_epi_zf`), cast to `ComplexF32`.
-3. Normalize k-space by 99th-percentile image intensity (via zero-filled SENSE combination).
-4. Infer sampling mask `Ω` from zero entries; validate mask consistency across coils and frames.
-5. Optionally move data to GPU.
-6. Build block-diagonal SENSE operator `A` (one block per time frame).
-7. Flatten and mask k-space to `(K, Nc, Nt)`.
-8. Compute or reuse Lipschitz constant `L = Nscales × σ₁(A)²`.
-9. Compute per-scale regularization weights `λ_k` via the Ong & Lustig formula, then divide by `scale_factor` to correct for the noise level in the normalized data (BART prewhitening gives σ_ksp ≈ 1; dividing k-space by `scale_factor` makes σ_norm = 1/scale_factor, so λ_k must be scaled down accordingly).
+3. Infer sampling mask `Ω` from zero entries; validate mask consistency across coils and frames.
+4. Optionally move data to GPU.
+5. Build block-diagonal SENSE operator `A` (one block per time frame).
+6. Flatten and mask k-space to `(K, Nc, Nt)`.
+7. Compute or reuse Lipschitz constant `L = Nscales × σ₁(A)²`.
+8. Compute per-scale regularization weights `λ_k` via the Ong & Lustig formula. Input k-space is assumed to be prewhitened by BART (σ_ksp ≈ 1); since A is approximately unitary, σ_image ≈ 1 and the formula applies directly with no correction.
 10. Run `pogm_restart` (from `src/mirt_mod.jl`) with the momentum scheme selected by the `mom` parameter (default `:fpgm`; `:pogm` and `:pgm` also supported) and the patch-SVST proximal operator applied independently to each scale component; progress is shown via `@showprogress` inside `pogm_restart`. Early stopping fires when the relative image-iterate change `‖x_new − x_prev‖_F / ‖x_prev‖_F` falls below `conv_tol` (default `1e-5`) for the first time after iteration 10, where the iterate is the prox-step output (ynew for `:fpgm`/`:pgm`, xnew for `:pogm`); set `conv_tol=0` to disable. No extra |X|-sized buffer is needed — the check uses already-live `yold`/`xold`. Default `NITERS=200`.
 11. Save output as `<fn_recon_base>_<Nscales>scales.mat`.
 

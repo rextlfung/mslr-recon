@@ -95,15 +95,7 @@ function run_recon(;
     @assert size(smaps_cpu) == (Nx, Ny, Nz, Nvc) "smaps shape $(size(smaps_cpu)) doesn't match k-space dims ($Nx,$Ny,$Nz,$Nvc)"
 
 
-    # ── 3. Normalize k-space ──────────────────────────────────────────────────
-    println("Normalising k-space …")
-    img0         = sense_comb(ksp0, smaps_cpu)
-    scale_factor = quantile(vec(abs.(img0)), 0.99)
-    ksp0        ./= max(scale_factor, eps(Float32))
-    println("  Scale factor = ", round(scale_factor; digits=4))
-
-
-    # ── 4. Sampling mask and validation ───────────────────────────────────────
+    # ── 3. Sampling mask and validation ───────────────────────────────────────
     Ω = (ksp0[:, :, :, 1, :] .!= 0)
     R = (Nx * Ny * Nz) / sum(Ω[:, :, :, 1])
     println("Acceleration factor R ≈ ", round(R; digits=2))
@@ -172,15 +164,14 @@ function run_recon(;
 
     # ── 8. Regularization weights (Ong & Lustig 2016) ─────────────────────────
     # Formula assumes unit-variance noise in image space. BART prewhitening gives
-    # σ_ksp ≈ 1; after dividing k-space by scale_factor the effective noise is
-    # σ_norm = 1/scale_factor, so λ_k must be scaled down by the same factor.
+    # σ_ksp ≈ 1 and A is approximately unitary, so σ_image ≈ 1 — no correction needed.
     N_voxels = Nx * Ny * Nz
     λs = Float32[
         sqrt(prod(PATCH_SIZES[k])) +
         sqrt(Nt) +
         sqrt(log(N_voxels * Nt / max(prod(PATCH_SIZES[k]), Nt)))
         for k in 1:Nscales
-    ] ./ scale_factor
+    ]
     println("Regularization weights λs = ", round.(λs; digits=6))
 
 
@@ -292,7 +283,6 @@ function run_recon(;
         "strides"      => STRIDES,
         "lambdas"      => λs,
         "Niters"       => NITERS,
-        "scale_factor" => scale_factor,
         "used_gpu"     => use_gpu,
     ); compress=true)
 
