@@ -97,10 +97,10 @@ Random.seed!(7)
 M_cpu = randn(ComplexF32, 4, 6)
 sv    = svdvals(M_cpu)                         # descending order
 β_sv  = Float32(0.5 * (sv[end-1] + sv[end]))  # zeros the smallest singular value
-res_svst_cpu = SVST(M_cpu, β_sv)
+res_svst_cpu, _ = SVST(M_cpu, β_sv)
 
 if HAS_GPU
-    res_svst_gpu = SVST(cu(M_cpu), β_sv)
+    res_svst_gpu, _ = SVST(cu(M_cpu), β_sv)
     check("SVST CPU vs GPU", relerr(res_svst_gpu, res_svst_cpu), 1f-4)
 else
     println("  [SKIP] GPU not available")
@@ -116,10 +116,10 @@ println("\n=== 4. patchSVST — non-unit patches ===")
 Random.seed!(13)
 β_p = 0.1f0
 ps4, ss4 = [4, 4, 2], [4, 4, 2]
-res4_cpu = patchSVST(img_cpu, β_p, ps4, ss4)
+res4_cpu, _ = patchSVST(img_cpu, β_p, ps4, ss4)
 
 if HAS_GPU
-    res4_gpu = patchSVST(cu(img_cpu), β_p, ps4, ss4)
+    res4_gpu, _ = patchSVST(cu(img_cpu), β_p, ps4, ss4)
     check("patchSVST non-unit  CPU vs GPU", relerr(res4_gpu, res4_cpu), 1f-4)
 else
     println("  [SKIP] GPU not available")
@@ -135,10 +135,10 @@ end
 # ══════════════════════════════════════════════════════════════════════════════
 println("\n=== 5. patchSVST — unit patches [1,1,1] (different code paths!) ===")
 ps5, ss5 = [1, 1, 1], [1, 1, 1]
-res5_cpu = patchSVST(img_cpu, β_p, ps5, ss5)
+res5_cpu, _ = patchSVST(img_cpu, β_p, ps5, ss5)
 
 if HAS_GPU
-    res5_gpu = patchSVST(cu(img_cpu), β_p, ps5, ss5)
+    res5_gpu, _ = patchSVST(cu(img_cpu), β_p, ps5, ss5)
     check("patchSVST unit [1,1,1]  CPU vs GPU", relerr(res5_gpu, res5_cpu), 1f-4)
 else
     println("  [SKIP] GPU not available")

@@ -155,10 +155,12 @@ end
 # ============================================================
 
 """
-    SVST(X, β) -> X_lr
+    SVST(X, β) -> (X_lr, reg)
 
 Singular Value Soft-Thresholding: proximal operator for the nuclear norm.
 Shrinks singular values by `β` (zeros those below `β`).
+Returns the thresholded matrix and `reg = sum(max.(σ .- β, 0))`, the nuclear
+norm of the result, at no extra cost (byproduct of the SVD already computed).
 
 Works for both CPU (`Array`) and GPU (`CuArray`) matrices.
 On CPU, zero singular values are skipped for efficiency.
@@ -168,7 +170,7 @@ function SVST(X::AbstractMatrix, β)
     # Skip SVD for zero patches to avoid LAPACK SLASCL warnings — CPU only.
     # On GPU, calling norm() launches cuBLAS + a device→host copy per patch,
     # which exhausts CUDA resources when called 486k times (unit-patch scale).
-    X isa Array && norm(X) == 0 && return fill!(similar(X), zero(eltype(X)))
+    X isa Array && norm(X) == 0 && return fill!(similar(X), zero(eltype(X))), 0f0
 
     # DivideAndConquer SVD is fastest on CPU but can fail for ill-conditioned
     # matrices; fall back to QRIteration (CPU only via LAPACK)
@@ -180,7 +182,7 @@ function SVST(X::AbstractMatrix, β)
 
     β_T      = eltype(F.S)(β)
     s_thresh = max.(F.S .- β_T, zero(eltype(F.S)))
-    return _svst_reconstruct(F, s_thresh, X)
+    return _svst_reconstruct(F, s_thresh, X), Float32(sum(s_thresh))
 end
 
 # CPU: skip zero singular-value columns (faster for sparse spectra)
@@ -199,38 +201,50 @@ end
 
 # ── CPU / GPU loop dispatch ────────────────────────────────────────────────────
 
-# CPU: multi-threaded over patches
+# CPU: multi-threaded over patches; returns sum of per-patch nuclear norms.
 function _svst_loop!(P::Array, β, Np)
+    costs = zeros(Float32, Np)
     @threads for ip in 1:Np
-        P[:, :, ip] .= SVST(copy(view(P, :, :, ip)), β)
+        P[:, :, ip], costs[ip] = SVST(copy(view(P, :, :, ip)), β)
     end
+    return sum(costs)
 end
 
 # GPU (or any non-Array AbstractArray): sequential CUSOLVER calls, no @threads
 function _svst_loop!(P::AbstractArray, β, Np)
+    reg = 0f0
     for ip in 1:Np
-        P[:, :, ip] .= SVST(copy(view(P, :, :, ip)), β)
+        P[:, :, ip], c = SVST(copy(view(P, :, :, ip)), β)
+        reg += c
     end
+    return reg
 end
 
 # Per-patch threshold variants
 function _svst_loop!(P::Array, λs::Vector, Np)
+    costs = zeros(Float32, Np)
     @threads for ip in 1:Np
-        P[:, :, ip] .= SVST(copy(view(P, :, :, ip)), λs[ip])
+        P[:, :, ip], costs[ip] = SVST(copy(view(P, :, :, ip)), λs[ip])
     end
+    return sum(costs)
 end
 
 function _svst_loop!(P::AbstractArray, λs::Vector, Np)
+    reg = 0f0
     for ip in 1:Np
-        P[:, :, ip] .= SVST(copy(view(P, :, :, ip)), λs[ip])
+        P[:, :, ip], c = SVST(copy(view(P, :, :, ip)), λs[ip])
+        reg += c
     end
+    return reg
 end
 
 
 """
-    patchSVST(img, β, patch_size, stride_size) -> img_lr
+    patchSVST(img, β, patch_size, stride_size) -> (img_lr, reg)
 
 Apply patch-wise SVST to a 4-D image `(Nx,Ny,Nz,Nt)` with global threshold `β`.
+Returns the thresholded image and `reg`, the nuclear norm of the result across all
+patches (sum of thresholded singular values), at no extra SVD cost.
 CPU (`Array`) path builds the full patch tensor and uses `@threads`.
 GPU (`AbstractArray`) path streams one patch at a time — avoids the O(Np) tensor
 allocation, which can exceed 10 GB for moderate patch sizes on large volumes.
@@ -240,13 +254,14 @@ function patchSVST(img::Array{<:Any,4}, β, patch_size, stride_size)
     Nx, Ny, Nz, _ = size(img)
     psx, psy, psz = min(patch_size[1], Nx), min(patch_size[2], Ny), min(patch_size[3], Nz)
     if psx == 1 && psy == 1 && psz == 1
-        norms = sqrt.(sum(abs2, img; dims=4))
-        return img .* max.(1f0 .- Float32(β) ./ norms, 0f0)
+        norms  = sqrt.(sum(abs2, img; dims=4))
+        result = img .* max.(1f0 .- Float32(β) ./ norms, 0f0)
+        reg    = sum(max.(dropdims(norms; dims=4) .- Float32(β), 0f0))
+        return result, Float32(reg)
     end
-    P  = img2patches(img, patch_size, stride_size)
-    Np = size(P, 3)
-    _svst_loop!(P, β, Np)
-    return patches2img(P, patch_size, stride_size, size(img)[1:3])
+    P   = img2patches(img, patch_size, stride_size)
+    reg = _svst_loop!(P, β, size(P, 3))
+    return patches2img(P, patch_size, stride_size, size(img)[1:3]), reg
 end
 
 function patchSVST(img::AbstractArray{<:Any,4}, β, patch_size, stride_size)
@@ -260,11 +275,12 @@ function patchSVST(img::AbstractArray{<:Any,4}, β, patch_size, stride_size)
     # cuSOLVER launches that exhaust CUDA resources within a few POGM iterations.
     if psx == 1 && psy == 1 && psz == 1
         # norms shape: (Nx, Ny, Nz, 1); sum(abs2, ·; dims) fuses map+reduce (no temp)
-        norms = sqrt.(sum(abs2, img; dims=4))
-        β_T   = Float32(β)
+        norms  = sqrt.(sum(abs2, img; dims=4))
+        β_T    = Float32(β)
         # IEEE: β_T/0 = Inf → 1-Inf = -Inf → max(-Inf,0) = 0 for zero voxels
-        scale = max.(1f0 .- β_T ./ norms, 0f0)
-        return img .* scale
+        result = img .* max.(1f0 .- β_T ./ norms, 0f0)
+        reg    = Float32(sum(max.(dropdims(norms; dims=4) .- β_T, 0f0)))
+        return result, reg
     end
 
     Nsteps_x = cld(Nx - psx, ssx)
@@ -272,32 +288,35 @@ function patchSVST(img::AbstractArray{<:Any,4}, β, patch_size, stride_size)
     Nsteps_z = cld(Nz - psz, ssz)
     img_out = fill!(similar(img, ComplexF32, Nx, Ny, Nz, Nt), zero(ComplexF32))
     Pcount  = fill!(similar(img, Float32,   Nx, Ny, Nz),       zero(Float32))
+    reg = 0f0
     for iz in 0:Nsteps_z, iy in 0:Nsteps_y, ix in 0:Nsteps_x
         sx = min(ix*ssx + 1, Nx - psx + 1)
         sy = min(iy*ssy + 1, Ny - psy + 1)
         sz = min(iz*ssz + 1, Nz - psz + 1)
         P_p = reshape(img[sx:sx+psx-1, sy:sy+psy-1, sz:sz+psz-1, :], psx*psy*psz, Nt)
+        result, c = SVST(P_p, β)
         img_out[sx:sx+psx-1, sy:sy+psy-1, sz:sz+psz-1, :] .+=
-            reshape(SVST(P_p, β), psx, psy, psz, Nt)
+            reshape(result, psx, psy, psz, Nt)
         Pcount[sx:sx+psx-1, sy:sy+psy-1, sz:sz+psz-1] .+= 1f0
+        reg += c
     end
     Pcount .= max.(Pcount, 1f0)
     img_out ./= Pcount
-    return img_out
+    return img_out, reg
 end
 
 """
-    patchSVST(img, λs, patch_size, stride_size) -> img_lr
+    patchSVST(img, λs, patch_size, stride_size) -> (img_lr, reg)
 
 Apply patch-wise SVST to a 4-D image with per-patch thresholds `λs` (length `Np` vector).
+Returns the thresholded image and `reg`, the nuclear norm of the result, at no extra SVD cost.
 CPU (`Array`) path builds the full patch tensor and uses `@threads`.
 GPU (`AbstractArray`) path streams one patch at a time.
 """
 function patchSVST(img::Array{<:Any,4}, λs::Vector, patch_size, stride_size)
-    P  = img2patches(img, patch_size, stride_size)
-    Np = size(P, 3)
-    _svst_loop!(P, λs, Np)
-    return patches2img(P, patch_size, stride_size, size(img)[1:3])
+    P   = img2patches(img, patch_size, stride_size)
+    reg = _svst_loop!(P, λs, size(P, 3))
+    return patches2img(P, patch_size, stride_size, size(img)[1:3]), reg
 end
 
 function patchSVST(img::AbstractArray{<:Any,4}, λs::Vector, patch_size, stride_size)
@@ -310,20 +329,23 @@ function patchSVST(img::AbstractArray{<:Any,4}, λs::Vector, patch_size, stride_
     Nsteps_z = cld(Nz - psz, ssz)
     img_out = fill!(similar(img, ComplexF32, Nx, Ny, Nz, Nt), zero(ComplexF32))
     Pcount  = fill!(similar(img, Float32,   Nx, Ny, Nz),       zero(Float32))
+    reg = 0f0
     ip = 1
     for iz in 0:Nsteps_z, iy in 0:Nsteps_y, ix in 0:Nsteps_x
         sx = min(ix*ssx + 1, Nx - psx + 1)
         sy = min(iy*ssy + 1, Ny - psy + 1)
         sz = min(iz*ssz + 1, Nz - psz + 1)
         P_p = reshape(img[sx:sx+psx-1, sy:sy+psy-1, sz:sz+psz-1, :], psx*psy*psz, Nt)
+        result, c = SVST(P_p, λs[ip])
         img_out[sx:sx+psx-1, sy:sy+psy-1, sz:sz+psz-1, :] .+=
-            reshape(SVST(P_p, λs[ip]), psx, psy, psz, Nt)
+            reshape(result, psx, psy, psz, Nt)
         Pcount[sx:sx+psx-1, sy:sy+psy-1, sz:sz+psz-1] .+= 1f0
+        reg += c
         ip += 1
     end
     Pcount .= max.(Pcount, 1f0)
     img_out ./= Pcount
-    return img_out
+    return img_out, reg
 end
 
 
@@ -451,11 +473,13 @@ end
 
 
 """
-    patchSVST(img, β, patch_size, stride_size) -> img_lr
+    patchSVST(img, β, patch_size, stride_size) -> (img_lr, reg)
 
 Patch-wise SVST for 2-D + time data `(Ny, Nz, Nt)`.
 Patches are normalized by their leading singular value before thresholding
 and rescaled afterwards to preserve contrast. Zero patches are skipped.
+`reg` is returned as 0 (σ1-rescaling makes the post-threshold nuclear norm
+non-trivial to track without an extra SVD).
 Dispatches on `ndims(img) == 3`; see also the 4-D GPU-compatible variant above.
 """
 function patchSVST(img::AbstractArray{<:Any,3}, β, patch_size, stride_size)
@@ -465,11 +489,11 @@ function patchSVST(img::AbstractArray{<:Any,3}, β, patch_size, stride_size)
     @threads for ip in 1:Np
         σ1s[ip] == 0 && continue
         P[:, :, ip] ./= σ1s[ip]
-        P[:, :, ip]  .= SVST(copy(view(P, :, :, ip)), β)
+        P[:, :, ip], _ = SVST(copy(view(P, :, :, ip)), β)
         σ1_new = opnorm(view(P, :, :, ip))
         σ1_new > 0 && (P[:, :, ip] .*= σ1s[ip] / σ1_new)
     end
-    return patches2img(P, patch_size, stride_size, size(img)[1:2])
+    return patches2img(P, patch_size, stride_size, size(img)[1:2]), 0f0
 end
 
 end # module Recon

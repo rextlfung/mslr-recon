@@ -204,16 +204,22 @@ function run_recon(;
         )
     end
 
-    # patchSVST dispatches on CuArray vs Array automatically via src/recon.jl
+    # patchSVST returns (thresholded_img, nuclear_norm) — the nuclear norm is the sum
+    # of thresholded singular values, a free byproduct of the SVD already computed.
+    # X[:,:,:,:,k] without @views creates an Array copy (CPU) or CuArray copy (GPU),
+    # ensuring dispatch reaches the multi-threaded CPU path (not the streaming GPU path).
     g_prox = (X, c) -> begin
         # Force GC before the first scale's patch-tensor allocation to free any
         # lingering gradient intermediates from dc_cost_grad (image_sum, Ax, residual, g
         # each up to 4.9 GB on GPU but not collected promptly by the GC).
         use_gpu && (GC.gc(true); CUDA.reclaim())
+        reg = 0f0
         for k in 1:Nscales
-            @views X[:, :, :, :, k] = patchSVST(
-                X[:, :, :, :, k], c * λs[k], PATCH_SIZES[k], STRIDES[k])
+            result, cost = patchSVST(X[:, :, :, :, k], c * λs[k], PATCH_SIZES[k], STRIDES[k])
+            @views X[:, :, :, :, k] = result
+            reg += λs[k] * cost
         end
+        last_reg[] = reg
         return X
     end
 
@@ -231,9 +237,8 @@ function run_recon(;
 
     # ── 11. FISTA ─────────────────────────────────────────────────────────────
     # Gradient restart (:gr) decides restarts from gradient direction, not Fcost values,
-    # so passing dc_cost as Fcost avoids expensive nuclear-norm computation each iteration.
-    # reg_cost is always evaluated: on GPU, xk is copied to CPU before calling reg_cost
-    # to keep patch tensors off-device (img2patches on CuArray can exceed 10 GB).
+    # so passing dc_cost as Fcost avoids a separate cost evaluation each iteration.
+    # reg_cost is logged for free via g_prox (sum of thresholded singular values).
     backend_str = use_gpu ? "GPU" : "CPU"
     if use_gpu
         free_b, total_b = CUDA.available_memory(), CUDA.total_memory()
@@ -241,17 +246,12 @@ function run_recon(;
                 " GB / total=", round(total_b/1e9; digits=2), " GB")
     end
     println("\nIteratively reconstructing ($NITERS iterations, $Nscales scale(s), $backend_str, mom=$mom) …")
-    last_reg = Ref(0f0)
-    logger = (iter, xk, _, is_restart, Fcostnew) -> begin
-        # reg_cost runs on CPU: on GPU, copy xk first to avoid allocating a full
-        # patch tensor on-device (img2patches on a CuArray can exceed 10 GB).
-        # Evaluate every 5 iterations to avoid paying SVD cost each iteration.
-        if iter % 5 == 0
-            xk_cpu = use_gpu ? Array(xk) : xk
-            last_reg[] = reg_cost(xk_cpu)
-        end
-        (Fcostnew, last_reg[], is_restart)
-    end
+    # reg_cost at iter 0 (before any prox): computed once from the initial iterate.
+    last_reg = Ref(reg_cost(use_gpu ? Array(X0) : X0))
+    # From iter 1 onward, last_reg[] is updated for free inside g_prox — no extra SVDs.
+    # For :fpgm, the captured value is reg_cost(ynew) (prox output), consistent with
+    # Fcostnew = dc_cost(ynew); for :pogm/:pgm, ynew === xnew so the value is exact.
+    logger = (iter, xk, _, is_restart, Fcostnew) -> (Fcostnew, last_reg[], is_restart)
     X, costs = pogm_restart(
         X0, dc_cost, dc_cost_grad, L;
         mom      = mom,
