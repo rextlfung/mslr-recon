@@ -19,11 +19,12 @@ julia -t auto experiments/<experiment>.jl
 julia experiments/<experiment>.jl
 ```
 
-**Analyze a completed reconstruction:**
+**Generate a reconstruction report:**
 ```bash
 julia scripts/analyze.jl /path/to/recon_3scales.mat
 julia scripts/analyze.jl /path/to/recon_3scales.mat --no-components
 ```
+Writes `<prefix>_report.png` (2×2: convergence, rel_change, mean magnitude, tSNR), `<prefix>_report.txt` (parameters + convergence + image-quality summary), and `<prefix>_scale<k>.png` per scale into `plots/`.
 
 **REPL workflow with hot-reload (experiment files use `Revise.includet`):**
 Edits to `src/` files are picked up automatically while the REPL is open. Re-include the experiment file to re-run without restarting Julia.
@@ -66,8 +67,8 @@ The sampling mask `Ω` is moved to GPU (`cu(Ω)`) alongside k-space so that k-sp
 6. Flatten and mask k-space to `(K, Nc, Nt)`.
 7. Compute or reuse Lipschitz constant `L = Nscales × σ₁(A)²`.
 8. Compute per-scale regularization weights `λ_k` via the Ong & Lustig formula. Input k-space is assumed to be prewhitened by BART (σ_ksp ≈ 1); since A is approximately unitary, σ_image ≈ 1 and the formula applies directly with no correction.
-10. Run `pogm_restart` (from `src/mirt_mod.jl`) with the momentum scheme selected by the `mom` parameter (default `:fpgm`; `:pogm` and `:pgm` also supported) and the patch-SVST proximal operator applied independently to each scale component; progress is shown via `@showprogress` inside `pogm_restart`. Early stopping fires when the relative image-iterate change `‖x_new − x_prev‖_F / ‖x_prev‖_F` falls below `conv_tol` (default `1e-5`) for the first time after iteration 10, where the iterate is the prox-step output (ynew for `:fpgm`/`:pgm`, xnew for `:pogm`); set `conv_tol=0` to disable. No extra |X|-sized buffer is needed — the check uses already-live `yold`/`xold`. Default `NITERS=200`.
-11. Save output as `<fn_recon_base>_<Nscales>scales.mat`.
+10. Run `pogm_restart` (from `src/mirt_mod.jl`) with the momentum scheme selected by the `mom` parameter (default `:fpgm`; `:pogm` and `:pgm` also supported) and the patch-SVST proximal operator applied independently to each scale component; progress is shown via `@showprogress` inside `pogm_restart`. The relative iterate change `‖x_new − x_prev‖_F / ‖x_prev‖_F` is computed every iteration (reusing already-live `yold`/`xold`) and logged via the `fun` callback. Early stopping fires when it falls below `conv_tol` (default `1e-5`) for the first time after iteration 10, where the iterate is the prox-step output (ynew for `:fpgm`/`:pgm`, xnew for `:pogm`); set `conv_tol=0` to disable. Default `NITERS=200`. The whole `pogm_restart` call is wrapped in `time()` to capture wall-clock runtime.
+11. Save output as `<fn_recon_base>_<Nscales>scales.mat`. Persisted keys include the recon (`X`, `X_recon`, `omega`), per-iteration traces (`dc_costs`, `reg_costs`, `restarts`, `rel_changes`), parameters (`R`, `sigma1A`, `L`, `Nscales`, `patch_sizes`, `strides`, `lambdas`, `Niters`, `mom`, `conv_tol`), and runtime metadata (`used_gpu`, `device`, `runtime_s`). See README.md for the full key reference.
 
 The reconstruction variable `X` has shape `(Nx, Ny, Nz, Nt, Nscales)`. The cost function operates on `image_sum(X) = sum(X; dims=5)` for data consistency, but the proximal step acts on each scale independently.
 
@@ -75,11 +76,16 @@ The reconstruction variable `X` has shape `(Nx, Ny, Nz, Nt, Nscales)`. The cost 
 
 The reconstruction uses `pogm_restart` from `src/mirt_mod.jl`. The momentum scheme is selected by `run_recon`'s `mom` parameter (`:fpgm` default, `:pogm`, or `:pgm`). The prox step size is fixed at `α = 1/L` every iteration for `:fpgm`/`:pgm`, giving a fixed SVST threshold of `α × λ_k = λ_k / L`; `:pogm` uses a per-iteration `zetanew`. `poweriter` estimates the Lipschitz constant if not precomputed.
 
-`pogm_restart` is a modified port of `MIRT.pogm_restart`. `MIRT.pogm_restart` cannot run on GPU because it allocates gradients with `zeros(size(x0))` (creates a CPU Float64 array), uses Float64 scalar literals that would promote `CuArray{ComplexF32}` to `ComplexF64`, and uses `real(-Fgrad .* ynew_yold)` which allocates large intermediate CuArrays. `mirt_mod.jl` fixes all three, and additionally adds early stopping via `conv_tol`. Progress display is driven by `@showprogress` inside `pogm_restart`. The `fun` return values `(dc_cost, reg_cost, is_restart)` are collected into the `costs` array and unpacked for saving/plotting.
+`pogm_restart` is a modified port of `MIRT.pogm_restart`. `MIRT.pogm_restart` cannot run on GPU because it allocates gradients with `zeros(size(x0))` (creates a CPU Float64 array), uses Float64 scalar literals that would promote `CuArray{ComplexF32}` to `ComplexF64`, and uses `real(-Fgrad .* ynew_yold)` which allocates large intermediate CuArrays. `mirt_mod.jl` fixes all three, and additionally adds early stopping via `conv_tol`. Progress display is driven by `@showprogress` inside `pogm_restart`. The `fun` callback is invoked with `(iter, xk, yk, is_restart, Fcostnew, rel_change)` — one more positional arg than upstream MIRT, where `rel_change` is the per-iteration `‖Δx‖/‖x‖` (NaN at iter 0). `reconstruct.jl`'s logger returns `(Fcostnew, last_reg[], is_restart, rel_change)`, which are collected into the `costs` array and unpacked into `dc_costs`, `reg_costs`, `restarts`, `rel_changes` for saving/plotting.
 
-### `src/analysis.jl`
+### `scripts/analyze.jl` and `src/analysis.jl`
 
-Provides `tSNR` and `plotOpt`. `analyze.jl` auto-saves all plots as PNGs to `plots/` (created on first run) with a filename prefix derived from the input `.mat` basename.
+`src/analysis.jl` provides reusable utilities (`tSNR`, `plotOpt`). `scripts/analyze.jl` defines `run_report(fn_recon; show_components=true)`, which loads a recon `.mat` and writes three artifacts to `plots/` (created on first run) with a filename prefix derived from the input `.mat` basename:
+- `<prefix>_report.png` — single 2×2 figure: convergence, relative iterate change (log-y, with `conv_tol` reference line), mean magnitude montage, tSNR montage.
+- `<prefix>_report.txt` — parameters + convergence + image-quality stats.
+- `<prefix>_scale<k>.png` — per-scale mean magnitude (omitted when `show_components=false` or `Nscales == 1`).
+
+Older `.mat` files lacking the newer metadata keys (`rel_changes`, `runtime_s`, `device`, `mom`, `conv_tol`) are handled via `haskey` fallbacks — the rel-change panel renders an "n/a" placeholder and missing summary lines are omitted.
 
 ## Key implementation details
 

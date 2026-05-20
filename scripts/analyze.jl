@@ -1,9 +1,14 @@
 #=
 analyze.jl
-Post-reconstruction analysis and visualization.
+Post-reconstruction reporting.
 
 Usage:
     julia scripts/analyze.jl /path/to/recon_Nscales.mat [--no-components]
+
+Produces:
+    plots/<basename>_report.png   — convergence + rel_change + mean_mag + tSNR
+    plots/<basename>_report.txt   — parameters and convergence/image-quality stats
+    plots/<basename>_scale<k>.png — per-scale mean magnitude (if Nscales > 1)
 
 Rex Fung, University of Michigan
 =#
@@ -13,7 +18,7 @@ if abspath(PROGRAM_FILE) == @__FILE__
     Pkg.activate(joinpath(@__DIR__, ".."))
 end
 
-using LinearAlgebra, Statistics
+using LinearAlgebra, Statistics, Printf
 using MAT
 using Plots
 using MIRTjim: jim
@@ -22,12 +27,73 @@ using LaTeXStrings
 include(joinpath(@__DIR__, "..", "src", "analysis.jl"))
 using .Analysis
 
-const _JIM_SIZE  = (1400, 700)
-const _PLOT_SIZE = (1400, 600)
 const _PLOTS_DIR = joinpath(@__DIR__, "..", "plots")
 
 
-function run_analysis(fn_recon; show_components=true)
+_fmt_vec(v) = "[" * join(Int.(v), ", ") * "]"
+
+function _format_summary(; fn_recon, Nx, Ny, Nz, Nt, R, σ1A, L_val,
+        Nscales, patch_sizes, strides, λs,
+        Niters, Niters_actual, n_restarts,
+        used_gpu, device, runtime_s, mom_str, conv_tol,
+        dc_final, reg_final, rel_change_final,
+        img_min, img_max, img_mean, img_std,
+        mean_tsnr, peak_tsnr)
+    device_label = if device !== nothing
+        device
+    elseif used_gpu === nothing
+        "?"
+    else
+        used_gpu ? "GPU" : "CPU"
+    end
+    io = IOBuffer()
+    println(io, "Reconstruction Report")
+    println(io, "="^60)
+    println(io, "File: $(basename(fn_recon))")
+    println(io)
+    println(io, "── Parameters ─────────────────────────────────────────")
+    @printf(io, "  Image:        %d × %d × %d,  Nt = %d\n", Nx, Ny, Nz, Nt)
+    println(io, "  Device(s):    ", device_label)
+    @printf(io, "  Acceleration: R ≈ %.2f\n", R)
+    println(io, "  Momentum:     ", mom_str)
+    println(io, "  Nscales:      ", Nscales)
+    for k in 1:Nscales
+        ps = _fmt_vec(patch_sizes[k])
+        st = strides === nothing ? "—" : _fmt_vec(strides[k])
+        @printf(io, "    Scale %d: patch = %-16s stride = %-16s λ = %.4f\n",
+                k, ps, st, λs[k])
+    end
+    if isfinite(σ1A);   @printf(io, "  σ₁(A):        %.4f\n", σ1A);   end
+    if isfinite(L_val); @printf(io, "  L:            %.4f\n", L_val); end
+    if runtime_s !== nothing
+        mm, ss = divrem(round(Int, runtime_s), 60)
+        @printf(io, "  Wall-clock:   %dm %02ds (%.1f s)\n", mm, ss, runtime_s)
+    end
+    println(io)
+    println(io, "── Convergence ────────────────────────────────────────")
+    @printf(io, "  Iterations:   %d / %d", Niters_actual, Niters)
+    if Niters_actual < Niters
+        @printf(io, "  (early stop, conv_tol = %.1e)\n", conv_tol === nothing ? NaN : conv_tol)
+    else
+        println(io, "  (ran full schedule)")
+    end
+    println(io, "  Restarts:     ", n_restarts)
+    @printf(io, "  Final dc_cost:  %.4g\n", dc_final)
+    @printf(io, "  Final reg_cost: %.4g\n", reg_final)
+    @printf(io, "  Final total:    %.4g\n", dc_final + reg_final)
+    if rel_change_final !== nothing
+        @printf(io, "  Final ‖Δx‖/‖x‖: %.2e\n", rel_change_final)
+    end
+    println(io)
+    println(io, "── Image quality ──────────────────────────────────────")
+    @printf(io, "  |X_recon|:    min = %.3g, mean = %.3g, max = %.3g, std = %.3g\n",
+            img_min, img_mean, img_max, img_std)
+    @printf(io, "  tSNR:         mean = %.2f, peak = %.2f\n", mean_tsnr, peak_tsnr)
+    return String(take!(io))
+end
+
+
+function run_report(fn_recon; show_components=true)
     isfile(fn_recon) || error("File not found: $fn_recon")
 
     mkpath(_PLOTS_DIR)
@@ -37,111 +103,115 @@ function run_analysis(fn_recon; show_components=true)
     println("Loading: $fn_recon")
     f = matread(fn_recon)
 
-    X_recon      = f["X_recon"]        # (Nx, Ny, Nz, Nt) complex
-    X_components = f["X"]              # (Nx, Ny, Nz, Nt, Nscales) complex
-    dc_costs     = f["dc_costs"]
-    reg_costs    = f["reg_costs"]
-    restarts     = Bool.(f["restarts"])
+    X_recon      = f["X_recon"]
+    X_components = f["X"]
+    dc_costs     = vec(f["dc_costs"])
+    reg_costs    = vec(f["reg_costs"])
+    restarts     = Bool.(vec(f["restarts"]))
     R            = f["R"]
     Nscales      = Int(f["Nscales"])
     Niters       = Int(f["Niters"])
-    λs           = f["lambdas"]
+    λs           = vec(f["lambdas"])
     patch_sizes  = f["patch_sizes"]
+    strides      = haskey(f, "strides")     ? f["strides"]            : nothing
+    σ1A          = haskey(f, "sigma1A")     ? f["sigma1A"]            : NaN
+    L_val        = haskey(f, "L")           ? f["L"]                  : NaN
+    used_gpu     = haskey(f, "used_gpu")    ? Bool(f["used_gpu"])     : nothing
+    device       = haskey(f, "device")      ? String(f["device"])     : nothing
+    runtime_s    = haskey(f, "runtime_s")   ? f["runtime_s"]          : nothing
+    mom_str      = haskey(f, "mom")         ? String(f["mom"])        : "?"
+    conv_tol     = haskey(f, "conv_tol")    ? f["conv_tol"]           : nothing
+    rel_changes  = haskey(f, "rel_changes") ? vec(f["rel_changes"])   : nothing
 
     Nx, Ny, Nz, Nt = size(X_recon)
-    println("  Image size: $(Nx)×$(Ny)×$(Nz), Nt=$Nt")
-    println("  Nscales=$Nscales,  Niters=$Niters,  R ≈ $(round(R; digits=2))")
-    println("  λs = $(round.(λs; digits=3))")
+    Niters_actual  = length(dc_costs) - 1
+    n_restarts     = count(restarts)
 
-    mag = abs.(X_recon)   # (Nx, Ny, Nz, Nt) Float64
+    # ── Image stats ───────────────────────────────────────────────────────────
+    mag = abs.(X_recon)
+    img_min, img_max = extrema(mag)
+    img_mean = mean(mag)
+    img_std  = std(mag)
 
-
-    # ── 1. Convergence ────────────────────────────────────────────────────────
-    println("Plotting convergence …")
-    p = plotOpt(dc_costs, reg_costs, restarts; plot_size=_PLOT_SIZE)
-    display(p)
-    savefig(p, "$(prefix)_convergence.png")
-
-
-    # ── 2. Mean magnitude (anatomy) ───────────────────────────────────────────
-    println("Plotting mean magnitude …")
-    mean_mag = dropdims(mean(mag; dims=4); dims=4)
-    p = jim(mean_mag;
-        title  = "Mean magnitude",
-        xlabel = L"x", ylabel = L"y",
-        color  = :grays,
-        size   = _JIM_SIZE)
-    display(p)
-    savefig(p, "$(prefix)_mean_magnitude.png")
-
-
-    # ── 3. tSNR map ───────────────────────────────────────────────────────────
-    println("Computing tSNR …")
     tsnr_map   = tSNR(X_recon)
     finite_pos = filter(x -> isfinite(x) && x > 0, vec(tsnr_map))
     if isempty(finite_pos)
         @warn "tSNR map has no positive finite values — reconstruction may be zero or diverged"
-        mean_tsnr = 0.0
-        peak_tsnr = 0.0
+        mean_tsnr = peak_tsnr = 0.0
     else
         mean_tsnr = mean(finite_pos)
         peak_tsnr = maximum(finite_pos)
     end
-    println("  Mean tSNR = $(round(mean_tsnr; digits=2)),  Peak tSNR = $(round(peak_tsnr; digits=2))")
 
-    p = jim(tsnr_map;
-        title  = "tSNR  (mean=$(round(mean_tsnr; digits=2)), peak=$(round(peak_tsnr; digits=2)))",
-        xlabel = L"x", ylabel = L"y",
-        color  = :inferno,
-        size   = _JIM_SIZE)
-    display(p)
-    savefig(p, "$(prefix)_tsnr.png")
+    rel_change_final = if rel_changes === nothing
+        nothing
+    else
+        finite_rc = filter(isfinite, rel_changes)
+        isempty(finite_rc) ? nothing : last(finite_rc)
+    end
 
+    # ── Text summary ──────────────────────────────────────────────────────────
+    summary = _format_summary(;
+        fn_recon, Nx, Ny, Nz, Nt, R, σ1A, L_val,
+        Nscales, patch_sizes, strides, λs,
+        Niters, Niters_actual, n_restarts,
+        used_gpu, device, runtime_s, mom_str, conv_tol,
+        dc_final = dc_costs[end], reg_final = reg_costs[end],
+        rel_change_final,
+        img_min, img_max, img_mean, img_std,
+        mean_tsnr, peak_tsnr,
+    )
+    print(summary)
+    write("$(prefix)_report.txt", summary)
 
-    # ── 4. Temporal std map (functional contrast) ─────────────────────────────
-    println("Plotting temporal std …")
-    tstd_map = dropdims(std(mag; dims=4); dims=4)
-    p = jim(tstd_map;
-        title  = "Temporal std  (signal variation)",
-        xlabel = L"x", ylabel = L"y",
-        color  = :viridis,
-        size   = _JIM_SIZE)
-    display(p)
-    savefig(p, "$(prefix)_temporal_std.png")
+    # ── Report figure (2×2): convergence, rel_change, mean_mag, tSNR ─────────
+    p_conv = plotOpt(dc_costs, reg_costs, restarts)
 
+    p_rc = if rel_changes === nothing
+        plot(; title = "Relative iterate change (n/a)", legend = false,
+               framestyle = :none)
+    else
+        valid = findall(isfinite, rel_changes)
+        p = plot(valid .- 1, rel_changes[valid];
+                 xlabel = "Iteration",
+                 ylabel = L"\|\Delta x\| / \|x\|",
+                 title  = "Relative iterate change",
+                 yscale = :log10,
+                 lw     = 2,
+                 legend = false)
+        if conv_tol !== nothing && conv_tol > 0
+            hline!(p, [conv_tol]; label = "conv_tol",
+                   linestyle = :dash, color = :gray, alpha = 0.7)
+        end
+        p
+    end
 
-    # ── 5. Peak-tSNR voxel time course ────────────────────────────────────────
-    println("Plotting peak-tSNR voxel time course …")
-    peak_idx   = argmax(replace(tsnr_map, NaN => zero(eltype(tsnr_map))))
-    ix, iy, iz = Tuple(peak_idx)
-    tc         = mag[ix, iy, iz, :]
-    p = plot(tc;
-        xlabel = "Frame",
-        ylabel = "Magnitude",
-        title  = "Time course at peak-tSNR voxel ($ix, $iy, $iz)",
-        label  = false,
-        lw     = 1.5,
-        size   = (1400, 450))
-    display(p)
-    savefig(p, "$(prefix)_timecourse.png")
+    mean_mag = dropdims(mean(mag; dims=4); dims=4)
+    p_mag = jim(mean_mag; title = "Mean magnitude", color = :grays)
+    p_tsnr = jim(tsnr_map;
+                 title = "tSNR  (mean=$(round(mean_tsnr; digits=1)), peak=$(round(peak_tsnr; digits=1)))",
+                 color = :inferno)
 
+    p_report = plot(p_conv, p_rc, p_mag, p_tsnr;
+                    layout = (2, 2), size = (1400, 900))
+    display(p_report)
+    savefig(p_report, "$(prefix)_report.png")
 
-    # ── 6. Scale component mean images ────────────────────────────────────────
+    # ── Per-scale mean magnitude (separate figures) ───────────────────────────
     if show_components && Nscales > 1
         println("Plotting scale components …")
         for k in 1:Nscales
             comp_mean = dropdims(mean(abs.(X_components[:, :, :, :, k]); dims=4); dims=4)
             p = jim(comp_mean;
-                title  = "Scale $k mean magnitude  (patch=$(patch_sizes[k]))",
-                xlabel = L"x", ylabel = L"y",
-                color  = :grays,
-                size   = _JIM_SIZE)
-            display(p)
+                    title  = "Scale $k mean magnitude  (patch=$(_fmt_vec(patch_sizes[k])))",
+                    color  = :grays,
+                    size   = (1400, 700))
             savefig(p, "$(prefix)_scale$(k).png")
         end
     end
 
-    println("Plots saved to: $(_PLOTS_DIR)")
+    println("Report saved to: $(_PLOTS_DIR)")
+    return prefix
 end
 
 
@@ -150,5 +220,5 @@ if abspath(PROGRAM_FILE) == @__FILE__
         println("Usage: julia scripts/analyze.jl <recon_file.mat> [--no-components]")
         exit(0)
     end
-    run_analysis(ARGS[1]; show_components = !("--no-components" in ARGS))
+    run_report(ARGS[1]; show_components = !("--no-components" in ARGS))
 end

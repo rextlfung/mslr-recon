@@ -68,14 +68,19 @@ function run_recon(;
     mom::Symbol       = :fpgm,
     conv_tol::Float64 = 1e-5,
 )
-    # ── GPU sanity check ──────────────────────────────────────────────────────
+    # ── GPU sanity check & device identification ──────────────────────────────
     if use_gpu
         _CUDA_AVAILABLE || error(
             "use_gpu=true requires CUDA.jl and a working NVIDIA GPU.\n" *
             "Install CUDA.jl with:  julia -e 'using Pkg; Pkg.add(\"CUDA\")'")
-        println("GPU acceleration enabled  (device: ", CUDA.name(CUDA.device()), ")")
+        device_str = CUDA.name(CUDA.device())
+        println("GPU acceleration enabled  (device: ", device_str, ")")
         println("  Free VRAM: ", round(CUDA.available_memory() / 1e9; digits=1), " GB  /  ",
                 round(CUDA.total_memory()     / 1e9; digits=1), " GB total")
+    else
+        cpu_model = strip(Sys.cpu_info()[1].model)
+        device_str = "$cpu_model ($(Threads.nthreads()) threads)"
+        println("CPU reconstruction  (device: ", device_str, ")")
     end
 
     Nscales = length(PATCH_SIZES)
@@ -242,7 +247,9 @@ function run_recon(;
     # From iter 1 onward, last_reg[] is updated for free inside g_prox — no extra SVDs.
     # For :fpgm, the captured value is reg_cost(ynew) (prox output), consistent with
     # Fcostnew = dc_cost(ynew); for :pogm/:pgm, ynew === xnew so the value is exact.
-    logger = (iter, xk, _, is_restart, Fcostnew) -> (Fcostnew, last_reg[], is_restart)
+    logger = (iter, xk, _, is_restart, Fcostnew, rel_change) ->
+        (Fcostnew, last_reg[], is_restart, rel_change)
+    t_start = time()
     X, costs = pogm_restart(
         X0, dc_cost, dc_cost_grad, L;
         mom      = mom,
@@ -251,11 +258,13 @@ function run_recon(;
         fun      = logger,
         conv_tol = conv_tol,
     )
+    runtime_s = time() - t_start
 
-    dc_costs  = [c[1] for c in costs]
-    reg_costs = [c[2] for c in costs]
-    restarts  = [c[3] for c in costs]
-    X_recon   = image_sum(X)
+    dc_costs    = [c[1] for c in costs]
+    reg_costs   = [c[2] for c in costs]
+    restarts    = [c[3] for c in costs]
+    rel_changes = [c[4] for c in costs]
+    X_recon     = image_sum(X)
 
     # Move results back to CPU for saving
     if use_gpu
@@ -275,6 +284,7 @@ function run_recon(;
         "dc_costs"     => dc_costs,
         "reg_costs"    => reg_costs,
         "restarts"     => restarts,
+        "rel_changes"  => rel_changes,
         "R"            => R,
         "sigma1A"      => σ1A,
         "L"            => L,
@@ -284,8 +294,14 @@ function run_recon(;
         "lambdas"      => λs,
         "Niters"       => NITERS,
         "used_gpu"     => use_gpu,
+        "device"       => device_str,
+        "mom"          => String(mom),
+        "conv_tol"     => conv_tol,
+        "runtime_s"    => runtime_s,
     ); compress=true)
 
+    mm, ss = divrem(round(Int, runtime_s), 60)
+    println("Wall-clock: $(mm)m $(ss)s ($(round(runtime_s; digits=1)) s)")
     println("\n✓ Saved → $fn_out")
     return fn_out
 end

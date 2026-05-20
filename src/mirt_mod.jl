@@ -27,6 +27,11 @@ with the following changes:
      no extra |x|-sized allocation is needed beyond one transient for the norm difference.
      A configurable warmup period (conv_min_iter) must elapse before checks begin.
 
+  7. rel_change is computed every iteration and passed as the 6th argument to `fun`
+     (NaN at iter 0). This extends the MIRT.pogm_restart `fun` signature from 5 to 6
+     positional args — external callers using the default `fun` are unaffected; custom
+     callbacks must accept the new arg.
+
 poweriter wraps MIRT.poweriter, adding a ProgressMeter progress bar.
 
 Original algorithm: Donghwan Kim & Jeff Fessler, University of Michigan, 2017-2018.
@@ -58,7 +63,9 @@ end
 Proximal gradient method with optional momentum (`:pgm`, `:fpgm`, `:pogm`) and restart.
 Modified port of `MIRT.pogm_restart`: GPU-compatible, memory-efficient, with early stopping.
 
-Signature compatible with `MIRT.pogm_restart`; see that function's docstring for details.
+Signature follows `MIRT.pogm_restart` except `fun` takes one extra positional arg
+(`rel_change` — relative iterate change, NaN at iter 0); see that function's docstring
+for everything else.
 """
 function pogm_restart(
     x0,
@@ -72,7 +79,7 @@ function pogm_restart(
     bsig::Real            = 1,
     niter::Int            = 10,
     g_prox::Function      = (z, c::Real) -> z,
-    fun::Function         = (iter, xk, yk, is_restart, Fcostnew) -> undef,
+    fun::Function         = (iter, xk, yk, is_restart, Fcostnew, rel_change) -> undef,
     conv_tol::Real        = 0.,
     conv_min_iter::Int    = 10,
 )
@@ -96,7 +103,7 @@ function pogm_restart(
     Fcostold = Fcost(x0)
 
     out = Array{Any}(undef, niter + 1)
-    out[1] = fun(0, x0, x0, false, Fcostold)
+    out[1] = fun(0, x0, x0, false, Fcostold, T(NaN))
     niter == 0 && return x0, out[1:1]
     niter_actual = niter
 
@@ -191,23 +198,23 @@ function pogm_restart(
             zetaold = zetanew
         end
 
-        if conv_tol > 0 && iter >= conv_min_iter
-            # Compare prox outputs across consecutive iterations (not momentum points):
-            #   FPGM/PGM: ynew vs yold   POGM: xnew vs xold
-            # Both reference arrays are already live — no extra |x| buffer needed.
-            # norm(curr - prev) allocates one transient; reclaimed by next iter's forced GC.
-            recon_prev = mom === :pogm ? xold : yold
-            recon_curr = mom === :pogm ? xnew : ynew
-            rel_change = norm(recon_curr - recon_prev) / (norm(recon_prev) + eps(T))
-            if rel_change < T(conv_tol)
-                out[iter + 1] = fun(iter, xnew, ynew, is_restart, Fcostnew)
-                @info "Converged at iteration $iter (‖Δx‖/‖x‖ = $(round(rel_change; sigdigits=2)) < $conv_tol)"
-                niter_actual = iter
-                break
-            end
+        # Relative iterate change — compared between consecutive prox outputs:
+        #   FPGM/PGM: ynew vs yold   POGM: xnew vs xold
+        # Both reference arrays are already live — no extra |x| buffer needed.
+        # norm(curr - prev) allocates one transient; reclaimed by next iter's forced GC.
+        # Always computed (logged via fun), and reused for the early-stop check below.
+        recon_prev = mom === :pogm ? xold : yold
+        recon_curr = mom === :pogm ? xnew : ynew
+        rel_change = norm(recon_curr - recon_prev) / (norm(recon_prev) + eps(T))
+
+        if conv_tol > 0 && iter >= conv_min_iter && rel_change < T(conv_tol)
+            out[iter + 1] = fun(iter, xnew, ynew, is_restart, Fcostnew, rel_change)
+            @info "Converged at iteration $iter (‖Δx‖/‖x‖ = $(round(rel_change; sigdigits=2)) < $conv_tol)"
+            niter_actual = iter
+            break
         end
 
-        out[iter + 1] = fun(iter, xnew, ynew, is_restart, Fcostnew)
+        out[iter + 1] = fun(iter, xnew, ynew, is_restart, Fcostnew, rel_change)
         xold = xnew
         yold = ynew
         (mom !== :pgm && iszero(mu)) && (told = tnew)

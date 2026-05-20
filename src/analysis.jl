@@ -49,7 +49,7 @@ end
 """
     plotOpt(dc_costs, reg_costs, restarts; logscale=false)
 
-Plot POGM optimization progress: data-consistency cost, regularization cost,
+Plot optimization progress: data-consistency cost, regularization cost,
 total cost, and restart events.
 
 # Arguments
@@ -74,7 +74,7 @@ function plotOpt(
         label   = "Data Consistency",
         xlabel  = "Iteration",
         ylabel  = "Cost",
-        title   = "POGM Optimization Convergence",
+        title   = "Optimization Convergence",
         lw      = 2,
         legend  = :topright,
         size    = plot_size)

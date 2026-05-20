@@ -37,4 +37,4 @@ if !isfile(fn_out)
     )
 end
 
-run_analysis(fn_out)
+run_report(fn_out)

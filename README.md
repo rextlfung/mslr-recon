@@ -54,7 +54,7 @@ mslr-recon/
 │
 ├── scripts/
 │   ├── reconstruct.jl        # Reconstruction module — called by experiment files
-│   └── analyze.jl            # Post-reconstruction analysis and visualization
+│   └── analyze.jl            # Post-reconstruction reporting (`run_report`)
 │
 └── experiments/
     ├── 20241017tap.jl        # Finger-tapping, 10 coils, Nt=300
@@ -102,7 +102,7 @@ julia experiments/my_experiment.jl
 
 Set `use_gpu = true` or `false` inside the experiment file to choose the backend. Output is saved as `<fn_recon_base>_<Nscales>scales.mat`.
 
-### Analysing the result
+### Generating a report
 
 ```bash
 julia scripts/analyze.jl /path/to/recon_3scales.mat
@@ -110,10 +110,13 @@ julia scripts/analyze.jl /path/to/recon_3scales.mat
 
 Optional flags:
 ```bash
---no-components     # skip per-scale component images
+--no-components     # skip per-scale component figures
 ```
 
-All plots are saved as PNGs to `plots/` (created automatically) with a filename prefix matching the input `.mat` basename (e.g. `plots/caipi_recon_2scales_tsnr.png`).
+Three artifacts are written to `plots/` (created automatically) with a filename prefix matching the input `.mat` basename:
+- `<prefix>_report.png` — single 2×2 figure: optimization convergence, relative iterate change, mean magnitude montage, tSNR montage.
+- `<prefix>_report.txt` — short text summary: parameters used, convergence stats (iterations reached, restarts, final costs, final `‖Δx‖/‖x‖`), and image-quality stats (intensity range + tSNR).
+- `<prefix>_scale<k>.png` — per-scale mean magnitude (one per scale when `Nscales > 1`).
 
 ---
 
@@ -211,19 +214,30 @@ Zero entries in the k-space file are treated as unsampled. The sampling mask is 
 
 ## Output file format
 
+The length of the per-iteration traces is `Niters_run+1`, where `Niters_run ≤ NITERS` (early stopping may exit before the cap).
+
 | Key | Shape | Description |
 |:----|:------|:------------|
-| `X_recon` | `(Nx, Ny, Nz, Nt)` | Reconstructed image as sum of all components |
-| `X` | `(Nx, Ny, Nz, Nt, Nscales)` | Individual scale components |
+| `X_recon` | `(Nx, Ny, Nz, Nt)` ComplexF32 | Reconstructed image as sum of all components |
+| `X` | `(Nx, Ny, Nz, Nt, Nscales)` ComplexF32 | Individual scale components |
 | `omega` | `(Nx, Ny, Nz, Nt)` Bool | k-space sampling mask |
-| `dc_costs` | `(Niters+1,)` | Data-consistency cost per iteration |
-| `reg_costs` | `(Niters+1,)` | Regularization cost per iteration |
-| `restarts` | `(Niters+1,)` | POGM restart events |
+| `dc_costs` | `(Niters_run+1,)` | Data-consistency cost per iteration |
+| `reg_costs` | `(Niters_run+1,)` | Regularization cost per iteration |
+| `restarts` | `(Niters_run+1,)` Bool | Momentum restart events |
+| `rel_changes` | `(Niters_run+1,)` | Relative iterate change `‖Δx‖/‖x‖` (NaN at iter 0) |
 | `lambdas` | `(Nscales,)` | Per-scale regularization weights |
-| `scale_factor` | scalar | k-space normalization constant |
-| `sigma1A` | scalar | Spectral norm of $\mathcal{A}$ |
+| `patch_sizes` | nested vectors | Per-scale patch shapes |
+| `strides` | nested vectors | Per-scale strides |
 | `R` | scalar | Acceleration factor |
+| `sigma1A` | scalar | Spectral norm of $\mathcal{A}$ |
+| `L` | scalar | Lipschitz constant `Nscales · σ₁(A)²` |
+| `Nscales` | scalar | Number of decomposition scales |
+| `Niters` | scalar | NITERS cap (compare to `length(dc_costs)-1` to detect early stop) |
 | `used_gpu` | Bool | Whether GPU was used |
+| `device` | string | GPU name, or `<CPU model> (<n> threads)` |
+| `mom` | string | Momentum scheme (`fpgm` / `pogm` / `pgm`) |
+| `conv_tol` | scalar | Early-stopping tolerance |
+| `runtime_s` | scalar | Wall-clock seconds for the optimizer |
 
 ---
 

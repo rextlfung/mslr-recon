@@ -36,8 +36,8 @@ datasets = [
 
 for ds in datasets
     fn_out = joinpath(RECON_DIR, "$(ds.base)_$(NSCALES)scales.mat")
-    println("Reconstructing: $(ds.ksp)")
     if !isfile(fn_out)
+        println("Reconstructing: $(ds.ksp)")
         fn_out = run_recon(
             fn_ksp          = joinpath(RECON_DIR, ds.ksp),
             fn_smaps        = FN_SMAPS,
@@ -50,5 +50,5 @@ for ds in datasets
             mom             = :fpgm,
         )
     end
-    run_analysis(fn_out)
+    run_report(fn_out)
 end
