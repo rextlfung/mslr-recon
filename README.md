@@ -100,12 +100,12 @@ julia -t auto experiments/my_experiment.jl
 julia experiments/my_experiment.jl
 ```
 
-Set `use_gpu = true` or `false` inside the experiment file to choose the backend. Output is saved as `<fn_recon_base>_<Nscales>scales.mat`.
+Set `use_gpu = true` or `false` inside the experiment file to choose the backend. Output is saved to the path specified by `fn_recon`.
 
 ### Generating a report
 
 ```bash
-julia scripts/analyze.jl /path/to/recon_3scales.mat
+julia scripts/analyze.jl /path/to/recon.mat
 ```
 
 Optional flags:
@@ -135,7 +135,7 @@ using .Reconstruct
 run_recon(
     fn_ksp          = "/data/my_experiment/kspace.mat",
     fn_smaps        = "/data/my_experiment/smaps_bart.mat",
-    fn_recon_base   = "/data/my_experiment/recon",
+    fn_recon        = "/data/my_experiment/recon.mat",
     PATCH_SIZES     = [[90,90,60], [10,10,10]],   # one component per scale
     STRIDES         = [[90,90,60], [10,10,10]],   # non-overlapping
     σ1A_PRECOMPUTED = 1.0,               # set to `nothing` to compute via power iteration

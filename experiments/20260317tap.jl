@@ -19,22 +19,37 @@ Pkg.activate(joinpath(@__DIR__, ".."))
 using Revise
 Revise.includet(joinpath(@__DIR__, "..", "scripts", "reconstruct.jl"))
 Revise.includet(joinpath(@__DIR__, "..", "scripts", "analyze.jl"))
+Revise.includet(joinpath(@__DIR__, "..", "utils", "recon_cache.jl"))
 using .Reconstruct
+using .ReconCache
 
-fn_out = "/StorageRAID/rexfung/20260317tap/recon/caipi_recon_3scales.mat"
+const RECON_DIR   = "/StorageRAID/rexfung/20260317tap/recon"
+const FN_SMAPS    = joinpath(RECON_DIR, "smaps_bart.mat")
+const PATCH_SIZES = [[90, 90, 60], [6, 6, 6], [1, 1, 1]]
+const STRIDES     = [[45, 45, 30], [3, 3, 3], [1, 1, 1]]   # half-overlapping
 
-if !isfile(fn_out)
-    fn_out = run_recon(
-        fn_ksp          = "/StorageRAID/rexfung/20260317tap/recon/caipi_epi_zf.mat",
-        fn_smaps        = "/StorageRAID/rexfung/20260317tap/recon/smaps_bart.mat",
-        fn_recon_base   = "/StorageRAID/rexfung/20260317tap/recon/caipi_recon",
-        PATCH_SIZES     = [[90, 90, 60], [6, 6, 6], [1, 1, 1]],
-        STRIDES         = [[45, 45, 30], [3, 3, 3], [1, 1, 1]],   # half-overlapping
-        NITERS          = 50,
-        σ1A_PRECOMPUTED = 1.0,
-        use_gpu         = false,    # ← set false for CPU
-        mom             = :fpgm,
-    )
+fn_out = joinpath(RECON_DIR, "caipi_recon.mat")
+try
+    if !params_match(fn_out;
+            NITERS          = 50,
+            PATCH_SIZES     = PATCH_SIZES,
+            STRIDES         = STRIDES,
+            σ1A_PRECOMPUTED = 1.0,
+            mom             = :fpgm)
+        println("Reconstructing: caipi_epi_zf.mat")
+        fn_out = run_recon(
+            fn_ksp          = joinpath(RECON_DIR, "caipi_epi_zf.mat"),
+            fn_smaps        = FN_SMAPS,
+            fn_recon        = fn_out,
+            PATCH_SIZES     = PATCH_SIZES,
+            STRIDES         = STRIDES,
+            NITERS          = 50,
+            σ1A_PRECOMPUTED = 1.0,
+            mom             = :fpgm,
+            use_gpu         = false,    # ← set false for CPU
+        )
+    end
+    run_report(fn_out)
+catch e
+    @error "Failed on $(basename(fn_out))" exception=(e, catch_backtrace())
 end
-
-run_report(fn_out)

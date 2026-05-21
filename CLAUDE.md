@@ -21,8 +21,8 @@ julia experiments/<experiment>.jl
 
 **Generate a reconstruction report:**
 ```bash
-julia scripts/analyze.jl /path/to/recon_3scales.mat
-julia scripts/analyze.jl /path/to/recon_3scales.mat --no-components
+julia scripts/analyze.jl /path/to/recon.mat
+julia scripts/analyze.jl /path/to/recon.mat --no-components
 ```
 Writes `<prefix>_report.png` (2×2: convergence, rel_change, mean magnitude, tSNR), `<prefix>_report.txt` (parameters + convergence + image-quality summary), and `<prefix>_scale<k>.png` per scale into `plots/`.
 
@@ -68,7 +68,7 @@ The sampling mask `Ω` is moved to GPU (`cu(Ω)`) alongside k-space so that k-sp
 7. Compute or reuse Lipschitz constant `L = Nscales × σ₁(A)²`.
 8. Compute per-scale regularization weights `λ_k` via the Ong & Lustig formula. Input k-space is assumed to be prewhitened by BART (σ_ksp ≈ 1); since A is approximately unitary, σ_image ≈ 1 and the formula applies directly with no correction.
 10. Run `pogm_restart` (from `src/mirt_mod.jl`) with the momentum scheme selected by the `mom` parameter (default `:fpgm`; `:pogm` and `:pgm` also supported) and the patch-SVST proximal operator applied independently to each scale component; progress is shown via `@showprogress` inside `pogm_restart`. The relative iterate change `‖x_new − x_prev‖_F / ‖x_prev‖_F` is computed every iteration (reusing already-live `yold`/`xold`) and logged via the `fun` callback. Early stopping fires when it falls below `conv_tol` (default `1e-5`) for the first time after iteration 10, where the iterate is the prox-step output (ynew for `:fpgm`/`:pgm`, xnew for `:pogm`); set `conv_tol=0` to disable. Default `NITERS=200`. The whole `pogm_restart` call is wrapped in `time()` to capture wall-clock runtime.
-11. Save output as `<fn_recon_base>_<Nscales>scales.mat`. Persisted keys include the recon (`X`, `X_recon`, `omega`), per-iteration traces (`dc_costs`, `reg_costs`, `restarts`, `rel_changes`), parameters (`R`, `sigma1A`, `L`, `Nscales`, `patch_sizes`, `strides`, `lambdas`, `Niters`, `mom`, `conv_tol`), and runtime metadata (`used_gpu`, `device`, `runtime_s`). See README.md for the full key reference.
+11. Save output to `fn_recon` (the caller-specified full path). Persisted keys include the recon (`X`, `X_recon`, `omega`), per-iteration traces (`dc_costs`, `reg_costs`, `restarts`, `rel_changes`), parameters (`R`, `sigma1A`, `L`, `Nscales`, `patch_sizes`, `strides`, `lambdas`, `Niters`, `mom`, `conv_tol`), and runtime metadata (`used_gpu`, `device`, `runtime_s`). See README.md for the full key reference.
 
 The reconstruction variable `X` has shape `(Nx, Ny, Nz, Nt, Nscales)`. The cost function operates on `image_sum(X) = sum(X; dims=5)` for data consistency, but the proximal step acts on each scale independently.
 

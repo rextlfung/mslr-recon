@@ -3,7 +3,7 @@
 Experiment configuration for the 2026-04-08 finger-tapping dataset.
 2.4 mm isotropic, 21 virtual coils, Nt=387 frames.
 Multi-scale LR decomposition: global + local + sparse scales, half-overlapping patches.
-Runs all 3 acquired datasets sequentially (caipi_ts, caipi, pd).
+Runs all 3 acquired datasets sequentially (caipi, caipi_ts, pd).
 
 Set use_gpu = true / false below, then run:
 
@@ -20,7 +20,9 @@ Pkg.activate(joinpath(@__DIR__, ".."))
 using Revise
 Revise.includet(joinpath(@__DIR__, "..", "scripts", "reconstruct.jl"))
 Revise.includet(joinpath(@__DIR__, "..", "scripts", "analyze.jl"))
+Revise.includet(joinpath(@__DIR__, "..", "utils", "recon_cache.jl"))
 using .Reconstruct
+using .ReconCache
 
 const RECON_DIR  = "/StorageRAID/rexfung/20260409tap/recon"
 const FN_SMAPS   = joinpath(RECON_DIR, "smaps_bart.mat")
@@ -35,20 +37,29 @@ datasets = [
 ]
 
 for ds in datasets
-    fn_out = joinpath(RECON_DIR, "$(ds.base)_$(NSCALES)scales.mat")
-    if !isfile(fn_out)
-        println("Reconstructing: $(ds.ksp)")
-        fn_out = run_recon(
-            fn_ksp          = joinpath(RECON_DIR, ds.ksp),
-            fn_smaps        = FN_SMAPS,
-            fn_recon_base   = joinpath(RECON_DIR, ds.base),
-            PATCH_SIZES     = PATCH_SIZES,
-            STRIDES         = STRIDES,
-            NITERS          = 100,
-            σ1A_PRECOMPUTED = 0.968294, # measured via tests/sigma1A_test.jl
-            use_gpu         = true,
-            mom             = :fpgm,
-        )
+    fn_out = joinpath(RECON_DIR, "$(ds.base).mat")
+    try
+        if !params_match(fn_out;
+                NITERS          = 200,
+                PATCH_SIZES     = PATCH_SIZES,
+                STRIDES         = STRIDES,
+                σ1A_PRECOMPUTED = 0.968294,
+                mom             = :fpgm)
+            println("Reconstructing: $(ds.ksp)")
+            fn_out = run_recon(
+                fn_ksp          = joinpath(RECON_DIR, ds.ksp),
+                fn_smaps        = FN_SMAPS,
+                fn_recon        = fn_out,
+                PATCH_SIZES     = PATCH_SIZES,
+                STRIDES         = STRIDES,
+                NITERS          = 200,
+                σ1A_PRECOMPUTED = 0.968294, # measured via tests/sigma1A_test.jl
+                mom             = :fpgm,
+                use_gpu         = true,
+            )
+        end
+        run_report(fn_out)
+    catch e
+        @error "Failed on $(ds.ksp)" exception=(e, catch_backtrace())
     end
-    run_report(fn_out)
 end

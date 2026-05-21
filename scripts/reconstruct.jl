@@ -4,7 +4,7 @@ Multi-scale Locally Low-Rank (MSLR) fMRI Reconstruction via Decomposition.
 
 Defines module Reconstruct with a single entry point:
 
-    run_recon(; fn_ksp, fn_smaps, fn_recon_base,
+    run_recon(; fn_ksp, fn_smaps, fn_recon,
                 PATCH_SIZES, STRIDES, NITERS=200,
                 σ1A_PRECOMPUTED, use_gpu=false, mom=:fpgm, conv_tol=1e-5)
 
@@ -59,7 +59,7 @@ export run_recon
 function run_recon(;
     fn_ksp::String,
     fn_smaps::String,
-    fn_recon_base::String,
+    fn_recon::String,
     PATCH_SIZES::Vector,
     STRIDES::Vector,
     NITERS::Int       = 200,
@@ -275,7 +275,7 @@ function run_recon(;
 
 
     # ── 12. Save ──────────────────────────────────────────────────────────────
-    fn_out = fn_recon_base * "_$(Nscales)scales.mat"
+    fn_out = fn_recon
     mkpath(dirname(fn_out))
     matwrite(fn_out, Dict(
         "X"            => X,
