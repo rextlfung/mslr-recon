@@ -187,8 +187,8 @@ function run_report(fn_recon; show_components=true)
     end
 
     mean_mag = dropdims(mean(mag; dims=4); dims=4)
-    p_mag = jim(mean_mag; title = "Mean magnitude", color = :grays)
-    p_tsnr = jim(tsnr_map;
+    p_mag = jim(mean_mag[:, end:-1:1, :]; title = "Mean magnitude", color = :grays)
+    p_tsnr = jim(tsnr_map[:, end:-1:1, :];
                  title = "tSNR  (mean=$(round(mean_tsnr; digits=1)), peak=$(round(peak_tsnr; digits=1)))",
                  color = :inferno)
 
@@ -202,7 +202,7 @@ function run_report(fn_recon; show_components=true)
         println("Plotting scale components …")
         for k in 1:Nscales
             comp_mean = dropdims(mean(abs.(X_components[:, :, :, :, k]); dims=4); dims=4)
-            p = jim(comp_mean;
+            p = jim(comp_mean[:, end:-1:1, :];
                     title  = "Scale $k mean magnitude  (patch=$(_fmt_vec(patch_sizes[k])))",
                     color  = :grays,
                     size   = (1400, 700))
