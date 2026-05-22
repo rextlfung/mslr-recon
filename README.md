@@ -56,11 +56,14 @@ mslr-recon/
 │   ├── reconstruct.jl        # Reconstruction module — called by experiment files
 │   └── analyze.jl            # Post-reconstruction reporting (`run_report`)
 │
+├── utils/
+│   └── recon_cache.jl        # `params_match`: skips recomputation when saved params match
+│
 └── experiments/
     ├── 20241017tap.jl        # Finger-tapping, 10 coils, Nt=300
     ├── 20251106balltap.jl    # Ball phantom + finger-tapping, 18 coils, Nt=300
     ├── 20260317tap.jl        # Finger-tapping, 18 coils, Nt=387, half-overlapping patches
-    └── 20260409tap.jl        # Finger-tapping, 21 coils, Nt=387, 3-scale, half-overlapping; loops over 3 datasets (caipi, caipi_ts, pd), prints each before reconstructing
+    └── 20260409tap.jl        # Finger-tapping, 21 coils, Nt=387, 3-scale; loops over 3 datasets (caipi, caipi_ts, pd)
 ```
 
 ---
@@ -148,6 +151,8 @@ run_recon(
 ```
 
 Image dimensions (`Nx`, `Ny`, `Nz`), number of coils (`Nvc`), and number of frames (`Nt`) are inferred automatically from the k-space file. The sensitivity maps must match the k-space spatial dimensions and coil count — an assertion fires at load time if they don't.
+
+Real experiment files declare all parameters as `const` and guard the `run_recon` call with `params_match(fn_out; NITERS, PATCH_SIZES, STRIDES, σ1A_PRECOMPUTED, mom, conv_tol)` from `utils/recon_cache.jl` — this skips reconstruction when a saved output already matches the current parameters, enabling safe re-runs and iterative tuning.
 
 ### Patch schedule guide
 
@@ -243,7 +248,7 @@ The length of the per-iteration traces is `Niters_run+1`, where `Niters_run ≤ 
 
 ## Tips
 
-**λ is automatic.** The Ong & Lustig formula calibrates thresholds from patch geometry and Nt. It works correctly as long as k-space is normalized, which the reconstruction does internally (using the 99th-percentile image intensity).
+**λ is automatic.** The Ong & Lustig formula calibrates thresholds from patch geometry and Nt. It assumes the input k-space is prewhitened (σ_ksp ≈ 1) — BART's noise-prewhitening step satisfies this — so no manual tuning is needed.
 
 **Lipschitz constant.** `σ₁(A) ≤ 1.0` always — the unsubsampled operator is exactly unitary but subsampling reduces the spectral norm slightly (empirically `σ₁(A) ≈ 0.968` for the 20260409tap dataset). Set `σ1A_PRECOMPUTED = nothing` on the first run to measure it via power iteration (~20 min via `tests/sigma1A_test.jl`), then hard-code the result. Using `1.0` is safe (conservative step size) but ~6.7% suboptimal.
 

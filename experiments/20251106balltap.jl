@@ -24,17 +24,22 @@ using .ReconCache
 
 const RECON_DIR   = "/StorageRAID/rexfung/20251106balltap/tap/recon"
 const FN_SMAPS    = joinpath(RECON_DIR, "smaps_bart.mat")
-const PATCH_SIZES = [[90, 90, 60], [30, 30, 30], [10, 10, 10]]
-const STRIDES     = [[90, 90, 60], [30, 30, 30], [10, 10, 10]]
+const PATCH_SIZES       = [[90, 90, 60], [30, 30, 30], [10, 10, 10]]
+const STRIDES           = [[90, 90, 60], [30, 30, 30], [10, 10, 10]]
+const NITERS            = 50
+const σ1A_PRECOMPUTED   = 1.0
+const MOM               = :fpgm
+const CONV_TOL          = 1e-5
 
 fn_out = joinpath(RECON_DIR, "recon.mat")
 try
     if !params_match(fn_out;
-            NITERS          = 50,
+            NITERS          = NITERS,
             PATCH_SIZES     = PATCH_SIZES,
             STRIDES         = STRIDES,
-            σ1A_PRECOMPUTED = 1.0,
-            mom             = :fpgm)
+            σ1A_PRECOMPUTED = σ1A_PRECOMPUTED,
+            mom             = MOM,
+            conv_tol        = CONV_TOL)
         println("Reconstructing: rand6x.mat")
         fn_out = run_recon(
             fn_ksp          = joinpath(RECON_DIR, "rand6x.mat"),
@@ -42,9 +47,10 @@ try
             fn_recon        = fn_out,
             PATCH_SIZES     = PATCH_SIZES,
             STRIDES         = STRIDES,
-            NITERS          = 50,
-            σ1A_PRECOMPUTED = 1.0,
-            mom             = :fpgm,
+            NITERS          = NITERS,
+            σ1A_PRECOMPUTED = σ1A_PRECOMPUTED,
+            mom             = MOM,
+            conv_tol        = CONV_TOL,
             use_gpu         = true,    # ← set false for CPU
         )
     end

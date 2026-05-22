@@ -105,17 +105,17 @@ peak = N_opt × |X| + |img| + 3×|ksp| + persistent
 
 | Symbol | Definition | Source |
 |--------|-----------|--------|
-| `\|X\|` | `Nx·Ny·Nz·Nt·Nscales × 8 B` | Full 5-D reconstruction tensor; FPGM holds 5 simultaneous copies (xold, yold, xnew≡ynew, fgrad, Fgrad); POGM additionally allocates Fgradold, ynew_yold, unew, zold, uold |
-| `N_opt` | 5 (FISTA/FPGM), 9 (POGM), 4 (ISTA) | All with gradient restart; Fgradold/ynew_yold alias x0 for FPGM/ISTA (zero extra cost) |
+| `\|X\|` | `Nx·Ny·Nz·Nt·Nscales × 8 B` | Full 5-D reconstruction tensor; FPGM holds 6 simultaneous copies during Fcost (x0, xold, yold, fgrad, Fgrad, ynew); POGM additionally allocates Fgradold, ynew_yold, unew |
+| `N_opt` | 6 (FPGM), 9 (POGM), 5 (PGM) | During Fcost: x0 (held by caller's X0 binding), xold, yold, fgrad, Fgrad, ynew; Fgradold/ynew_yold alias x0 for FPGM/PGM (zero extra cost) |
 | `\|img\|` | `\|X\| / Nscales` | `image_sum(X)` transient inside `dc_cost` |
 | `\|ksp\|` | `K·Nvc·Nt × 8 B`, K = Nx·Ny·Nz/R | `Ax` and `Ax−ksp` briefly coexist during `dc_cost` (×2 transients); plus the stored k-space array (×1 persistent) = ×3 total |
 | `persistent` | smaps + ksp + Ω + idx | smaps: `Nx·Ny·Nz·Nvc×8 B`; Ω: `Nx·Ny·Nz·Nt×1 B`; idx (GPU only): `K·Nt×4 B` |
 
 **Example — 20260409tap** (N=90×90×60, Nt=387, Nvc=21, R≈6, Nscales=2):
 - `|X|` = 3.01 GB, `|img|` = 1.51 GB, `|ksp|` = 5.27 GB, persistent = 5.66 GB
-- peak = 5×3.01 + 1.51 + 3×5.27 + 0.40 = **32.8 GB** (vs ~44 GB with POGM)
+- peak = 6×3.01 + 1.51 + 3×5.27 + 0.40 = **35.8 GB** (vs ~44 GB with POGM)
 
-The peak occurs during `Fcostnew = Fcost(ynew)` — 5 FPGM buffers are live and `dc_cost` allocates `image_sum + Ax + residual`. Note `|ksp|` is independent of `Nscales`; adding scales raises the optimizer buffer term but not the k-space transients.
+The peak occurs during `Fcostnew = Fcost(ynew)` — 6 FPGM buffers are live (x0, xold, yold, fgrad, Fgrad, ynew) and `dc_cost` allocates `image_sum + Ax + residual`. Note `|ksp|` is independent of `Nscales`; adding scales raises the optimizer buffer term but not the k-space transients.
 
 **CPU vs GPU** (the formula applies to both VRAM and RAM):
 1. **Forced GC**: `use_gpu && (GC.gc(true); CUDA.reclaim())` fires before each `g_prox` on GPU (reconstruct.jl:212), freeing `dc_cost_grad` temporaries. CPU lacks this; in the worst case, `|img| + 2|ksp|` ≈ 12 GB of temps may linger into `g_prox`, though Julia's allocation-triggered GC usually reclaims them before they accumulate.
@@ -126,4 +126,4 @@ The peak occurs during `Fcostnew = Fcost(ynew)` — 5 FPGM buffers are live and 
 
 **Sensitivity map format**: `run_recon` reads the key `"smaps"` (not `"smaps_raw"`) from `fn_smaps`. The file is a `.mat` written by BART after compression to `Nvc` virtual coils.
 
-**Multi-dataset experiment files**: When an experiment loops over multiple datasets (e.g. `20260409tap.jl`), print `"Reconstructing: $(ds.ksp)"` before each `run_recon` call so progress is identifiable in long runs. Skip already-completed outputs with `isfile(fn_out)` before calling `run_recon`.
+**Experiment file structure**: All tunable parameters (`PATCH_SIZES`, `STRIDES`, `NITERS`, `σ1A_PRECOMPUTED`, `MOM`, `CONV_TOL`) are declared as `const` at the top of each experiment file. Cache skipping uses `params_match(fn_out; ...)` from `utils/recon_cache.jl`, which checks both file existence and that the saved parameters match the current constants — stale outputs with mismatched parameters are recomputed. Multi-dataset files loop over a `datasets` array and print `"Reconstructing: $(ds.ksp)"` before each call for progress visibility.

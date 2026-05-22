@@ -26,9 +26,13 @@ using .ReconCache
 
 const RECON_DIR  = "/StorageRAID/rexfung/20260409tap/recon"
 const FN_SMAPS   = joinpath(RECON_DIR, "smaps_bart.mat")
-const PATCH_SIZES = [[90, 90, 60], [6, 6, 6], [1, 1, 1]]
-const STRIDES     = [[90, 90, 60], [3, 3, 3], [1, 1, 1]]
-const NSCALES     = length(PATCH_SIZES)
+const PATCH_SIZES       = [[90, 90, 60], [6, 6, 6], [1, 1, 1]]
+const STRIDES           = [[90, 90, 60], [3, 3, 3], [1, 1, 1]]
+const NSCALES           = length(PATCH_SIZES)
+const NITERS            = 100
+const σ1A_PRECOMPUTED   = 0.968294   # measured via tests/sigma1A_test.jl
+const MOM               = :fpgm
+const CONV_TOL          = 1e-4
 
 datasets = [
     (ksp = "caipi_epi_zf.mat",    base = "mslr/caipi_recon"),
@@ -40,11 +44,12 @@ for ds in datasets
     fn_out = joinpath(RECON_DIR, "$(ds.base).mat")
     try
         if !params_match(fn_out;
-                NITERS          = 200,
+                NITERS          = NITERS,
                 PATCH_SIZES     = PATCH_SIZES,
                 STRIDES         = STRIDES,
-                σ1A_PRECOMPUTED = 0.968294,
-                mom             = :fpgm)
+                σ1A_PRECOMPUTED = σ1A_PRECOMPUTED,
+                mom             = MOM,
+                conv_tol        = CONV_TOL)
             println("Reconstructing: $(ds.ksp)")
             fn_out = run_recon(
                 fn_ksp          = joinpath(RECON_DIR, ds.ksp),
@@ -52,9 +57,10 @@ for ds in datasets
                 fn_recon        = fn_out,
                 PATCH_SIZES     = PATCH_SIZES,
                 STRIDES         = STRIDES,
-                NITERS          = 200,
-                σ1A_PRECOMPUTED = 0.968294, # measured via tests/sigma1A_test.jl
-                mom             = :fpgm,
+                NITERS          = NITERS,
+                σ1A_PRECOMPUTED = σ1A_PRECOMPUTED,
+                mom             = MOM,
+                conv_tol        = CONV_TOL,
                 use_gpu         = true,
             )
         end
