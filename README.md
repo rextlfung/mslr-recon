@@ -116,7 +116,7 @@ Optional flags:
 --no-components     # skip per-scale component figures
 ```
 
-Three artifacts are written to `plots/` (created automatically) with a filename prefix matching the input `.mat` basename:
+Three artifacts are written to the same directory as the input `.mat`, with a filename prefix matching its basename:
 - `<prefix>_report.png` — single 2×2 figure: optimization convergence, relative iterate change, mean magnitude montage, tSNR montage.
 - `<prefix>_report.txt` — short text summary: parameters used, convergence stats (iterations reached, restarts, final costs, final `‖Δx‖/‖x‖`), and image-quality stats (intensity range + tSNR).
 - `<prefix>_scale<k>.png` — per-scale mean magnitude (one per scale when `Nscales > 1`).
@@ -152,7 +152,12 @@ run_recon(
 
 Image dimensions (`Nx`, `Ny`, `Nz`), number of coils (`Nvc`), and number of frames (`Nt`) are inferred automatically from the k-space file. The sensitivity maps must match the k-space spatial dimensions and coil count — an assertion fires at load time if they don't.
 
-Real experiment files declare all parameters as `const` and guard the `run_recon` call with `params_match(fn_out; NITERS, PATCH_SIZES, STRIDES, σ1A_PRECOMPUTED, mom, conv_tol)` from `utils/recon_cache.jl` — this skips reconstruction when a saved output already matches the current parameters, enabling safe re-runs and iterative tuning.
+Real experiment files declare all parameters as `const` and use a three-branch guard around `run_recon`:
+- **Output missing** → run reconstruction and report.
+- **Output exists, params match** → skip reconstruction, regenerate report only.
+- **Output exists, params differ** → print a warning and skip entirely (no overwrite).
+
+This prevents accidentally clobbering a previous run when parameters change. To run with new parameters, move the old output to a subdirectory first, then re-run.
 
 ### Patch schedule guide
 

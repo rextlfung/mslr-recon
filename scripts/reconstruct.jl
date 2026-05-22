@@ -241,7 +241,7 @@ function run_recon(;
         println("  VRAM before FISTA: free=", round(free_b/1e9; digits=2),
                 " GB / total=", round(total_b/1e9; digits=2), " GB")
     end
-    println("\nIteratively reconstructing ($NITERS iterations, $Nscales scale(s), $backend_str, mom=$mom) …")
+    println("\nIteratively reconstructing on $backend_str ($NITERS iterations, $Nscales scale(s), mom=$mom, conv_tol=$conv_tol) …")
     # reg_cost at iter 0 (before any prox): computed once from the initial iterate.
     last_reg = Ref(reg_cost(use_gpu ? Array(X0) : X0))
     # From iter 1 onward, last_reg[] is updated for free inside g_prox — no extra SVDs.

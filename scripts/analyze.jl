@@ -5,10 +5,10 @@ Post-reconstruction reporting.
 Usage:
     julia scripts/analyze.jl /path/to/recon_Nscales.mat [--no-components]
 
-Produces:
-    plots/<basename>_report.png   — convergence + rel_change + mean_mag + tSNR
-    plots/<basename>_report.txt   — parameters and convergence/image-quality stats
-    plots/<basename>_scale<k>.png — per-scale mean magnitude (if Nscales > 1)
+Produces (in the same directory as the input .mat):
+    <basename>_report.png   — convergence + rel_change + mean_mag + tSNR
+    <basename>_report.txt   — parameters and convergence/image-quality stats
+    <basename>_scale<k>.png — per-scale mean magnitude (if Nscales > 1)
 
 Rex Fung, University of Michigan
 =#
@@ -26,9 +26,6 @@ using LaTeXStrings
 
 include(joinpath(@__DIR__, "..", "src", "analysis.jl"))
 using .Analysis
-
-const _PLOTS_DIR = joinpath(@__DIR__, "..", "plots")
-
 
 _fmt_vec(v) = "[" * join(Int.(v), ", ") * "]"
 
@@ -96,8 +93,7 @@ end
 function run_report(fn_recon; show_components=true)
     isfile(fn_recon) || error("File not found: $fn_recon")
 
-    mkpath(_PLOTS_DIR)
-    prefix = joinpath(_PLOTS_DIR, splitext(basename(fn_recon))[1])
+    prefix = joinpath(dirname(fn_recon), splitext(basename(fn_recon))[1])
 
     # ── Load ──────────────────────────────────────────────────────────────────
     println("Loading: $fn_recon")
@@ -210,7 +206,7 @@ function run_report(fn_recon; show_components=true)
         end
     end
 
-    println("Report saved to: $(_PLOTS_DIR)")
+    println("Report saved to: $(dirname(fn_recon))")
     return prefix
 end
 

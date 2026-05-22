@@ -24,7 +24,7 @@ julia experiments/<experiment>.jl
 julia scripts/analyze.jl /path/to/recon.mat
 julia scripts/analyze.jl /path/to/recon.mat --no-components
 ```
-Writes `<prefix>_report.png` (2×2: convergence, rel_change, mean magnitude, tSNR), `<prefix>_report.txt` (parameters + convergence + image-quality summary), and `<prefix>_scale<k>.png` per scale into `plots/`.
+Writes `<prefix>_report.png` (2×2: convergence, rel_change, mean magnitude, tSNR), `<prefix>_report.txt` (parameters + convergence + image-quality summary), and `<prefix>_scale<k>.png` per scale into the same directory as the input `.mat`.
 
 **REPL workflow with hot-reload (experiment files use `Revise.includet`):**
 Edits to `src/` files are picked up automatically while the REPL is open. Re-include the experiment file to re-run without restarting Julia.
@@ -80,7 +80,7 @@ The reconstruction uses `pogm_restart` from `src/mirt_mod.jl`. The momentum sche
 
 ### `scripts/analyze.jl` and `src/analysis.jl`
 
-`src/analysis.jl` provides reusable utilities (`tSNR`, `plotOpt`). `scripts/analyze.jl` defines `run_report(fn_recon; show_components=true)`, which loads a recon `.mat` and writes three artifacts to `plots/` (created on first run) with a filename prefix derived from the input `.mat` basename:
+`src/analysis.jl` provides reusable utilities (`tSNR`, `plotOpt`). `scripts/analyze.jl` defines `run_report(fn_recon; show_components=true)`, which loads a recon `.mat` and writes three artifacts to the same directory as the input `.mat`, with a filename prefix derived from its basename:
 - `<prefix>_report.png` — single 2×2 figure: convergence, relative iterate change (log-y, with `conv_tol` reference line), mean magnitude montage, tSNR montage.
 - `<prefix>_report.txt` — parameters + convergence + image-quality stats.
 - `<prefix>_scale<k>.png` — per-scale mean magnitude (omitted when `show_components=false` or `Nscales == 1`).
@@ -126,4 +126,4 @@ The peak occurs during `Fcostnew = Fcost(ynew)` — 6 FPGM buffers are live (x0,
 
 **Sensitivity map format**: `run_recon` reads the key `"smaps"` (not `"smaps_raw"`) from `fn_smaps`. The file is a `.mat` written by BART after compression to `Nvc` virtual coils.
 
-**Experiment file structure**: All tunable parameters (`PATCH_SIZES`, `STRIDES`, `NITERS`, `σ1A_PRECOMPUTED`, `MOM`, `CONV_TOL`) are declared as `const` at the top of each experiment file. Cache skipping uses `params_match(fn_out; ...)` from `utils/recon_cache.jl`, which checks both file existence and that the saved parameters match the current constants — stale outputs with mismatched parameters are recomputed. Multi-dataset files loop over a `datasets` array and print `"Reconstructing: $(ds.ksp)"` before each call for progress visibility.
+**Experiment file structure**: All tunable parameters (`PATCH_SIZES`, `STRIDES`, `NITERS`, `σ1A_PRECOMPUTED`, `MOM`, `CONV_TOL`) are declared as `const` at the top of each experiment file. Each experiment guards `run_recon` with a three-branch check: output missing → run; output exists and `params_match(fn_out; ...)` returns true → skip recon, regenerate report; output exists but params differ → `@warn` and skip (no overwrite). `params_match` is from `utils/recon_cache.jl`. To run with new parameters, shelve the old output to a subdirectory first. Multi-dataset files loop over a `datasets` array and print `"Reconstructing: $(ds.ksp)"` before each call for progress visibility.

@@ -34,13 +34,7 @@ const CONV_TOL          = 1e-5
 
 fn_out = joinpath(RECON_DIR, "caipi_recon.mat")
 try
-    if !params_match(fn_out;
-            NITERS          = NITERS,
-            PATCH_SIZES     = PATCH_SIZES,
-            STRIDES         = STRIDES,
-            σ1A_PRECOMPUTED = σ1A_PRECOMPUTED,
-            mom             = MOM,
-            conv_tol        = CONV_TOL)
+    if !isfile(fn_out)
         println("Reconstructing: caipi_epi_zf.mat")
         fn_out = run_recon(
             fn_ksp          = joinpath(RECON_DIR, "caipi_epi_zf.mat"),
@@ -54,8 +48,18 @@ try
             conv_tol        = CONV_TOL,
             use_gpu         = false,    # ← set false for CPU
         )
+        run_report(fn_out)
+    elseif params_match(fn_out;
+            NITERS          = NITERS,
+            PATCH_SIZES     = PATCH_SIZES,
+            STRIDES         = STRIDES,
+            σ1A_PRECOMPUTED = σ1A_PRECOMPUTED,
+            mom             = MOM,
+            conv_tol        = CONV_TOL)
+        run_report(fn_out)
+    else
+        @warn "Skipping caipi_epi_zf.mat: $(fn_out) exists with different parameters — shelve it first."
     end
-    run_report(fn_out)
 catch e
     @error "Failed on $(basename(fn_out))" exception=(e, catch_backtrace())
 end
