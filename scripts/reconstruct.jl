@@ -258,7 +258,8 @@ function run_recon(;
         fun      = logger,
         conv_tol = conv_tol,
     )
-    runtime_s = time() - t_start
+    runtime_s    = time() - t_start
+    iter_time_s  = runtime_s / (length(costs) - 1)
 
     dc_costs    = [c[1] for c in costs]
     reg_costs   = [c[2] for c in costs]
@@ -298,10 +299,11 @@ function run_recon(;
         "mom"          => String(mom),
         "conv_tol"     => conv_tol,
         "runtime_s"    => runtime_s,
+        "iter_time_s"  => iter_time_s,
     ); compress=true)
 
     mm, ss = divrem(round(Int, runtime_s), 60)
-    println("Wall-clock: $(mm)m $(ss)s ($(round(runtime_s; digits=1)) s)")
+    println("Wall-clock: $(mm)m $(ss)s ($(round(runtime_s; digits=1)) s), $(round(iter_time_s; digits=1)) s/iter")
     println("\n✓ Saved → $fn_out")
     return fn_out
 end
