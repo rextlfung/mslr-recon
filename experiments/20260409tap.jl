@@ -26,8 +26,8 @@ using .ReconCache
 
 const RECON_DIR  = "/StorageRAID/rexfung/20260409tap/recon"
 const FN_SMAPS   = joinpath(RECON_DIR, "smaps_bart.mat")
-const PATCH_SIZES       = [[90, 90, 60], [6, 6, 6], [1, 1, 1]]
-const STRIDES           = [[90, 90, 60], [3, 3, 3], [1, 1, 1]]
+const PATCH_SIZES       = [[6, 6, 6]]
+const STRIDES           = [[3, 3, 3]]
 const NSCALES           = length(PATCH_SIZES)
 const NITERS            = 100 # max number of iterations
 const σ1A_PRECOMPUTED   = 0.968294 # measured via tests/sigma1A_test.jl
