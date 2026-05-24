@@ -25,7 +25,10 @@ with the following changes:
      ‖x_new − x_prev‖_F / ‖x_prev‖_F < conv_tol, where x is the proximal-step output
      (ynew for :fpgm/:pgm, xnew for :pogm). Uses already-live buffers (yold/xold), so
      no extra |x|-sized allocation is needed beyond one transient for the norm difference.
-     A configurable warmup period (conv_min_iter) must elapse before checks begin.
+     conv_min_iter iterations must elapse before checks begin, and the same grace period
+     is re-applied after each gradient restart (since the post-restart step is momentum-free
+     and its rel_change is not comparable to the momentum-boosted changes used to set
+     conv_tol).
 
   7. rel_change is computed every iteration and passed as the 6th argument to `fun`
      (NaN at iter 0). This extends the MIRT.pogm_restart `fun` signature from 5 to 6
@@ -106,6 +109,7 @@ function pogm_restart(
     out[1] = fun(0, x0, x0, false, Fcostold, T(NaN))
     niter == 0 && return x0, out[1:1]
     niter_actual = niter
+    last_restart_iter = 0
 
     # xnew and ynew are assigned inside the loop (not pre-allocated):
     # in :pogm, xnew = g_prox(znew,...) and ynew = @. xold - alpha*Fgrad both rebind
@@ -206,8 +210,9 @@ function pogm_restart(
         recon_prev = mom === :pogm ? xold : yold
         recon_curr = mom === :pogm ? xnew : ynew
         rel_change = norm(recon_curr - recon_prev) / (norm(recon_prev) + eps(T))
+        is_restart && (last_restart_iter = iter)
 
-        if conv_tol > 0 && iter >= conv_min_iter && rel_change < T(conv_tol)
+        if conv_tol > 0 && iter >= last_restart_iter + conv_min_iter && rel_change < T(conv_tol)
             out[iter + 1] = fun(iter, xnew, ynew, is_restart, Fcostnew, rel_change)
             @info "Converged at iteration $iter (‖Δx‖/‖x‖ = $(round(rel_change; sigdigits=2)) < $conv_tol)"
             niter_actual = iter
