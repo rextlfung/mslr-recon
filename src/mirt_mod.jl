@@ -28,7 +28,8 @@ with the following changes:
      conv_min_iter iterations must elapse before checks begin, and the same grace period
      is re-applied after each gradient restart (since the post-restart step is momentum-free
      and its rel_change is not comparable to the momentum-boosted changes used to set
-     conv_tol).
+     conv_tol). The grace period decays by 1 each time a restart fires (floored at 1), so
+     a chain of restarts near convergence does not permanently block early stopping.
 
   7. rel_change is computed every iteration and passed as the 6th argument to `fun`
      (NaN at iter 0). This extends the MIRT.pogm_restart `fun` signature from 5 to 6
@@ -108,8 +109,9 @@ function pogm_restart(
     out = Array{Any}(undef, niter + 1)
     out[1] = fun(0, x0, x0, false, Fcostold, T(NaN))
     niter == 0 && return x0, out[1:1]
-    niter_actual = niter
+    niter_actual      = niter
     last_restart_iter = 0
+    adaptive_cmi      = conv_min_iter   # decays by 1 per restart; see early-stop check below
 
     # xnew and ynew are assigned inside the loop (not pre-allocated):
     # in :pogm, xnew = g_prox(znew,...) and ynew = @. xold - alpha*Fgrad both rebind
@@ -210,11 +212,14 @@ function pogm_restart(
         recon_prev = mom === :pogm ? xold : yold
         recon_curr = mom === :pogm ? xnew : ynew
         rel_change = norm(recon_curr - recon_prev) / (norm(recon_prev) + eps(T))
-        is_restart && (last_restart_iter = iter)
+        if is_restart
+            last_restart_iter = iter
+            adaptive_cmi      = max(1, adaptive_cmi - 1)
+        end
 
-        if conv_tol > 0 && iter >= last_restart_iter + conv_min_iter && rel_change < T(conv_tol)
+        if conv_tol > 0 && iter >= last_restart_iter + adaptive_cmi && rel_change < T(conv_tol)
             out[iter + 1] = fun(iter, xnew, ynew, is_restart, Fcostnew, rel_change)
-            @info "Converged at iteration $iter (‖Δx‖/‖x‖ = $(round(rel_change; sigdigits=2)) < $conv_tol)"
+            @info "Converged at iteration $iter (‖Δx‖/‖x‖ = $(round(rel_change; sigdigits=2)) < $conv_tol, grace=$adaptive_cmi)"
             niter_actual = iter
             break
         end

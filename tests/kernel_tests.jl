@@ -7,7 +7,7 @@ Layers tested (bottom-up):
   2. img2patches / patches2img: CPU Array vs GPU CuArray
   3. SVST: single matrix with ≥1 zero singular value after threshold (exercises findall branch on CPU)
   4. patchSVST: non-unit patches, CPU Array vs GPU CuArray
-  5. patchSVST: unit patches [1,1,1] — GPU takes a separate vectorised broadcast path; non-trivial equivalence
+  5. patchSVST: unit patches [1,1,1] — GPU takes a separate vectorized broadcast path; non-trivial equivalence
   6. Asense forward and adjoint: CPU (FFTW) vs GPU (cuFFT)
   7. Asense adjoint consistency: dot(Ax,y) ≈ dot(x,A'y) on each backend
 
@@ -129,7 +129,7 @@ end
 # ══════════════════════════════════════════════════════════════════════════════
 # 5. patchSVST — unit patches [1,1,1]
 #    CPU: img2patches → SVST of each 1×Nt matrix (SVD path)
-#    GPU: vectorised broadcast max.(1 - β/‖x‖, 0)·x  (no SVD!)
+#    GPU: vectorized broadcast max.(1 - β/‖x‖, 0)·x  (no SVD!)
 #    Equivalence: SVD of 1×Nt row vector gives U=[[1]], S=[‖x‖], Vt=x/‖x‖
 #    → SVST result = max(‖x‖-β,0)/‖x‖ · x = max(1-β/‖x‖,0) · x  ✓
 # ══════════════════════════════════════════════════════════════════════════════

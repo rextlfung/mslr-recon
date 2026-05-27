@@ -255,8 +255,9 @@ function patchSVST(img::Array{<:Any,4}, β, patch_size, stride_size)
     psx, psy, psz = min(patch_size[1], Nx), min(patch_size[2], Ny), min(patch_size[3], Nz)
     if psx == 1 && psy == 1 && psz == 1
         norms  = sqrt.(sum(abs2, img; dims=4))
-        result = img .* max.(1f0 .- Float32(β) ./ norms, 0f0)
-        reg    = sum(max.(dropdims(norms; dims=4) .- Float32(β), 0f0))
+        β_T    = Float32(β)
+        result = img .* max.(1f0 .- β_T ./ norms, 0f0)
+        reg    = sum(max.(dropdims(norms; dims=4) .- β_T, 0f0))
         return result, Float32(reg)
     end
     P   = img2patches(img, patch_size, stride_size)
@@ -271,8 +272,7 @@ function patchSVST(img::AbstractArray{<:Any,4}, β, patch_size, stride_size)
     psx = min(psx, Nx); psy = min(psy, Ny); psz = min(psz, Nz)
 
     # Unit patches: SVST of a (1, Nt) matrix = block soft-threshold of each voxel's
-    # time series.  Vectorised over the whole volume — avoids ~486k serial cuBLAS /
-    # cuSOLVER launches that exhaust CUDA resources within a few POGM iterations.
+    # time series.  Vectorized over the whole volume — avoids ~486k serial cuBLAS / cuSOLVER launches that exhaust CUDA resources within a few POGM iterations.
     if psx == 1 && psy == 1 && psz == 1
         # norms shape: (Nx, Ny, Nz, 1); sum(abs2, ·; dims) fuses map+reduce (no temp)
         norms  = sqrt.(sum(abs2, img; dims=4))
@@ -356,7 +356,7 @@ end
 """
     nn_viewshare(ksp) -> ksp_nn
 
-Nearest-neighbour k-space view sharing along the time dimension.
+Nearest-neighbor k-space view sharing along the time dimension.
 For each spatial location, unsampled time frames are filled by the
 nearest acquired frame. Locations never sampled remain zero.
 
