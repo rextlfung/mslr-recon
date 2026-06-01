@@ -114,7 +114,7 @@ function run_recon(;
     end
 
 
-    # ── 5. Move data to GPU (if requested) ────────────────────────────────────
+    # ── 4. Move data to GPU (if requested) ────────────────────────────────────
     if use_gpu
         println("Moving data to GPU …")
         smaps    = cu(smaps_cpu)   # CuArray{ComplexF32, 4}
@@ -128,7 +128,7 @@ function run_recon(;
     end
 
 
-    # ── 6. SENSE encoding operator A ──────────────────────────────────────────
+    # ── 5. SENSE encoding operator A ──────────────────────────────────────────
     println("Building encoding operator …")
     if use_gpu
         # GPU-native SENSE operator: closures capture cu(smaps), use cuFFT.
@@ -157,7 +157,7 @@ function run_recon(;
     end
 
 
-    # ── 7. Lipschitz constant ─────────────────────────────────────────────────
+    # ── 6. Lipschitz constant ─────────────────────────────────────────────────
     if isnothing(σ1A_PRECOMPUTED)
         println("Computing σ₁(A) via power iteration (may take ~20 min) …")
         _, σ1A = poweriter(undim(A))
@@ -168,7 +168,15 @@ function run_recon(;
     L = Nscales * σ1A^2
 
 
-    # ── 8. Regularization weights (Ong & Lustig 2016) ─────────────────────────
+    # ── 7. Regularization weights (Ong & Lustig 2016) ─────────────────────────
+    # λ_k = √p_k + √Nt + √(log(N_vox·Nt / max(p_k, Nt))),  p_k = voxels per patch.
+    # This is Ong & Lustig eq. (4), √m + √n + √(log(MN/max(m,n))), with the (space × time)
+    # block being p_k × Nt so M·N = N_vox·Nt. The log ARGUMENT matches Ong's reference code
+    # exactly (their bs·min(m,n) = MN/max(m,n)). The paper states the weight only up to a
+    # constant ("~"), so the log BASE is unspecified: we use natural log, whereas Ong's MATLAB
+    # reference uses log2 (≈1.20× larger third term ⇒ ~2–3% higher λ overall). λ_SCALE absorbs
+    # any global rescaling, so natural log is consistent with the paper; switch to log2 only if
+    # you want bit-level fidelity to the reference implementation.
     # Formula assumes unit-variance noise in image space. BART prewhitening gives
     # σ_ksp ≈ 1 and A is approximately unitary, so σ_image ≈ 1 — no correction needed.
     N_voxels = Nx * Ny * Nz
@@ -182,7 +190,7 @@ function run_recon(;
     println("Regularization weights λs = ", round.(λs; digits=6))
 
 
-    # ── 9. Cost functions and proximal operator ───────────────────────────────
+    # ── 8. Cost functions and proximal operator ───────────────────────────────
     image_sum(X) = dropdims(sum(X; dims=5); dims=5)
 
     function dc_cost(X)
@@ -202,6 +210,14 @@ function run_recon(;
         )
     end
 
+    # TODO(cycle-spinning): Ong & Lustig mitigate block/patch boundary artifacts with *random
+    # cycle spinning* — randomly shift X each iteration, block-SVST, then unshift, so blocking
+    # artifacts average out over iterations (Figueiredo & Nowak 2003, IEEE TIP 12(8):906-916;
+    # see also Coifman & Donoho 1995). This code instead uses non-overlapping patches (exact
+    # prox) or fixed-overlap patches (LLR overlap-averaging). Random cycle spinning is important
+    # for artifact suppression but non-trivial to add (wrap patchSVST with a per-iteration random
+    # shift/unshift); deferred for now. See MATH_REVIEW.md "Future work".
+    #
     # patchSVST returns (thresholded_img, nuclear_norm) — the nuclear norm is the sum
     # of thresholded singular values, a free byproduct of the SVD already computed.
     # X[:,:,:,:,k] without @views creates an Array copy (CPU) or CuArray copy (GPU),
@@ -221,7 +237,7 @@ function run_recon(;
         return X
     end
 
-    # ── 10. Initialize X ──────────────────────────────────────────────────────
+    # ── 9. Initialize X ──────────────────────────────────────────────────────
     if use_gpu
         X0 = CUDA.zeros(ComplexF32, Nx, Ny, Nz, Nt, Nscales)
     else
@@ -233,7 +249,7 @@ function run_recon(;
     use_gpu && (GC.gc(true); CUDA.reclaim())
 
 
-    # ── 11. FISTA ─────────────────────────────────────────────────────────────
+    # ── 10. FISTA ─────────────────────────────────────────────────────────────
     # Gradient restart (:gr) decides restarts from gradient direction, not Fcost values,
     # so passing dc_cost as Fcost avoids a separate cost evaluation each iteration.
     # reg_cost is logged for free via g_prox (sum of thresholded singular values).
@@ -277,7 +293,7 @@ function run_recon(;
     end
 
 
-    # ── 12. Save ──────────────────────────────────────────────────────────────
+    # ── 11. Save ──────────────────────────────────────────────────────────────
     fn_out = fn_recon
     mkpath(dirname(fn_out))
     matwrite(fn_out, Dict(

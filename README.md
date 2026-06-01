@@ -35,7 +35,7 @@ where:
 
 $$\lambda_k = \sqrt{p_k} + \sqrt{N_t} + \sqrt{\log\!\left(\frac{N_{vox} \cdot N_t}{\max(p_k,\, N_t)}\right)}$$
 
-where $p_k$ is the number of voxels in a patch at scale $k$.
+where $p_k$ is the number of voxels in a patch at scale $k$. The paper specifies this weight only up to a constant (it is written with "$\sim$"), so the logarithm base is free: this code uses the natural log, whereas Ong & Lustig's reference MATLAB implementation uses $\log_2$ (giving a ~2–3% larger $\lambda_k$). The empirical `λ_SCALE` factor absorbs any global rescaling, so either base is consistent with the paper.
 
 Optimization uses `pogm_restart` (from `src/mirt_mod.jl`) with gradient restart. The momentum scheme is configurable via the `mom` parameter (`:fpgm` default, `:pogm` for the Proximal Optimized Gradient Method, `:pgm` for plain gradient descent). The Lipschitz constant is $L = N_{scales} \cdot \sigma_1(\mathcal{A})^2$.
 

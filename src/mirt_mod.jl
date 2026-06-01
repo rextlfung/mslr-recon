@@ -137,6 +137,11 @@ function pogm_restart(
             Fgrad    = -(T(1) / alpha) * (ynew - xold)
             Fcostnew = Fcost(ynew)
 
+            # NOTE: :fr (function restart) compares Fcost values only. Callers such as
+            # reconstruct.jl pass just the smooth data-consistency term as Fcost (not the
+            # full f+g objective), so :fr would restart on the data term alone — not the
+            # true cost. The default :gr restart uses only the prox-gradient mapping Fgrad
+            # and is correct regardless; prefer :gr (same caveat applies to the :pogm branch).
             if restart !== :none
                 if (restart === :fr && Fcostnew > Fcostold) ||
                    (restart === :gr && _gr_restart(Fgrad, ynew - yold, restart_cutoff))

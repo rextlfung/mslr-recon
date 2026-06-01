@@ -21,7 +21,27 @@
   year      = {2016},
   doi       = {10.1109/JSTSP.2016.2545518},
   note      = {Source of the MSLR regularizer and the theoretically motivated λ_k formula
-               used in reconstruct.jl.},
+               used in reconstruct.jl. Eq. (4) gives λ_k only up to a constant ("~"), so the
+               log base is unspecified: reconstruct.jl uses natural log while the authors'
+               reference MATLAB code (demo_*.m) uses log2 (~2-3% larger λ_k). The paper also
+               recommends random cycle spinning to suppress block artifacts — not implemented
+               here (see figueiredo2003em and the cycle-spinning TODO in reconstruct.jl).},
+}
+
+% Translation-invariant ("cycle spinning") denoising: the technique Ong & Lustig (2016) use to
+% suppress block-partition artifacts. Recorded here for the deferred cycle-spinning TODO.
+@article{figueiredo2003em,
+  author    = {Figueiredo, M{\'a}rio A. T. and Nowak, Robert D.},
+  title     = {An {EM} Algorithm for Wavelet-Based Image Restoration},
+  journal   = {{IEEE} Transactions on Image Processing},
+  volume    = {12},
+  number    = {8},
+  pages     = {906--916},
+  year      = {2003},
+  doi       = {10.1109/TIP.2003.814255},
+  note      = {Translation-invariant (cycle-spinning) approach to suppressing block-partition
+               artifacts. MSLR (Ong & Lustig 2016) applies random cycle spinning rather than
+               overlapping blocks; deferred TODO in reconstruct.jl.},
 }
 
 % ── 2. Optimizer ──────────────────────────────────────────────────────────────
