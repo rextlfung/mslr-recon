@@ -67,6 +67,7 @@ function run_recon(;
     use_gpu::Bool     = false,
     mom::Symbol       = :fpgm,
     conv_tol::Float64 = 1e-5,
+    λ_SCALE::Float64  = 1.0,
 )
     # ── GPU sanity check & device identification ──────────────────────────────
     if use_gpu
@@ -177,6 +178,7 @@ function run_recon(;
         sqrt(log(N_voxels * Nt / max(prod(PATCH_SIZES[k]), Nt)))
         for k in 1:Nscales
     ]
+    λs .*= Float32(λ_SCALE)
     println("Regularization weights λs = ", round.(λs; digits=6))
 
 
@@ -293,6 +295,7 @@ function run_recon(;
         "patch_sizes"  => PATCH_SIZES,
         "strides"      => STRIDES,
         "lambdas"      => λs,
+        "lambda_scale" => λ_SCALE,
         "Niters"       => NITERS,
         "used_gpu"     => use_gpu,
         "device"       => device_str,

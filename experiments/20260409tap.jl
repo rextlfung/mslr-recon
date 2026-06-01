@@ -26,13 +26,14 @@ using .ReconCache
 
 const RECON_DIR  = "/StorageRAID/rexfung/20260409tap/recon"
 const FN_SMAPS   = joinpath(RECON_DIR, "smaps_bart.mat")
-const PATCH_SIZES       = [(90, 90, 60), (1,1,1)]
+const PATCH_SIZES       = [[90, 90, 60], [6,6,6], [1,1,1]]
 const STRIDES           = PATCH_SIZES # non-overlapping patches
 const NSCALES           = length(PATCH_SIZES)
 const NITERS            = 100 # max number of iterations
 const σ1A_PRECOMPUTED   = 1.0 # bounded by construction of encoding operator with unitary FFTs and normalized smaps
 const MOM               = :pogm # momentum
-const CONV_TOL          = 1e-3 # early stop tolerance for ||x_k - x_(k-1)||/||x_(k-1)||
+const CONV_TOL          = 1e-2 # early stop tolerance for ||x_k - x_(k-1)||/||x_(k-1)||
+const λ_SCALE           = 1.0  # multiplicative scale applied to auto-computed regularization weights
 const USE_GPU           = false
 
 datasets = [
@@ -56,6 +57,7 @@ for ds in datasets
                 σ1A_PRECOMPUTED = σ1A_PRECOMPUTED,
                 mom             = MOM,
                 conv_tol        = CONV_TOL,
+                λ_SCALE         = λ_SCALE,
                 use_gpu         = USE_GPU,
             )
             run_report(fn_out)
@@ -65,7 +67,8 @@ for ds in datasets
                 STRIDES         = STRIDES,
                 σ1A_PRECOMPUTED = σ1A_PRECOMPUTED,
                 mom             = MOM,
-                conv_tol        = CONV_TOL)
+                conv_tol        = CONV_TOL,
+                lambda_scale    = λ_SCALE)
             run_report(fn_out)
         else
             @warn "Skipping $(ds.ksp): $(fn_out) exists with different parameters — shelve it first."
