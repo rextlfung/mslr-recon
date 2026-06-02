@@ -32,7 +32,7 @@ _fmt_vec(v) = "[" * join(Int.(v), ", ") * "]"
 function _format_summary(; fn_recon, Nx, Ny, Nz, Nt, R, σ1A, L_val,
         Nscales, patch_sizes, strides, λs,
         Niters, Niters_actual, n_restarts,
-        used_gpu, device, runtime_s, mom_str, conv_tol,
+        used_gpu, device, runtime_s, mom_str, conv_tol, cycle_spin,
         dc_final, reg_final, rel_change_final,
         img_min, img_max, img_mean, img_std,
         mean_tsnr, peak_tsnr)
@@ -53,6 +53,7 @@ function _format_summary(; fn_recon, Nx, Ny, Nz, Nt, R, σ1A, L_val,
     println(io, "  Device(s):    ", device_label)
     @printf(io, "  Acceleration: R ≈ %.2f\n", R)
     println(io, "  Momentum:     ", mom_str)
+    println(io, "  Cycle spin:   ", cycle_spin === nothing ? "?" : (cycle_spin ? "yes" : "no"))
     println(io, "  Nscales:      ", Nscales)
     for k in 1:Nscales
         ps = _fmt_vec(patch_sizes[k])
@@ -117,6 +118,7 @@ function run_report(fn_recon; show_components=true)
     runtime_s    = haskey(f, "runtime_s")   ? f["runtime_s"]          : nothing
     mom_str      = haskey(f, "mom")         ? String(f["mom"])        : "?"
     conv_tol     = haskey(f, "conv_tol")    ? f["conv_tol"]           : nothing
+    cycle_spin   = haskey(f, "cycle_spin") ? Bool(f["cycle_spin"])   : nothing
     rel_changes  = haskey(f, "rel_changes") ? vec(f["rel_changes"])   : nothing
 
     Nx, Ny, Nz, Nt = size(X_recon)
@@ -151,7 +153,7 @@ function run_report(fn_recon; show_components=true)
         fn_recon, Nx, Ny, Nz, Nt, R, σ1A, L_val,
         Nscales, patch_sizes, strides, λs,
         Niters, Niters_actual, n_restarts,
-        used_gpu, device, runtime_s, mom_str, conv_tol,
+        used_gpu, device, runtime_s, mom_str, conv_tol, cycle_spin,
         dc_final = dc_costs[end], reg_final = reg_costs[end],
         rel_change_final,
         img_min, img_max, img_mean, img_std,

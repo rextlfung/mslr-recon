@@ -26,20 +26,21 @@ using .ReconCache
 
 const RECON_DIR  = "/StorageRAID/rexfung/20260409tap/recon"
 const FN_SMAPS   = joinpath(RECON_DIR, "smaps_bart.mat")
-const PATCH_SIZES       = [[90,90,60], [6,6,6]]
+const PATCH_SIZES       = [[90,90,60], [10,10,10]]
 const STRIDES           = PATCH_SIZES # non-overlapping patches
 const NSCALES           = length(PATCH_SIZES)
 const NITERS            = 100 # max number of iterations
 const σ1A_PRECOMPUTED   = 1.0 # upper-bound from unitary FFTs and normalized smaps
-const λ_SCALE           = 10.0 # multiplicative scale applied to auto-computed regularization weights
+const λ_SCALE           = 1.0 # multiplicative scale applied to auto-computed regularization weights
 const CONV_TOL          = 1e-3 # early stop tolerance for ||x_k - x_(k-1)||/||x_(k-1)||
 const MOM               = :fpgm # momentum
+const CYCLE_SPIN        = true
 const USE_GPU           = true
 
 datasets = [
+    (ksp = "pd_epi_zf.mat",       base = "mslr/pd_recon"),
     (ksp = "caipi_epi_zf.mat",    base = "mslr/caipi_recon"),
     (ksp = "caipi_ts_epi_zf.mat", base = "mslr/caipi_ts_recon"),
-    (ksp = "pd_epi_zf.mat",       base = "mslr/pd_recon"),
 ]
 
 for ds in datasets
@@ -58,6 +59,7 @@ for ds in datasets
                 mom             = MOM,
                 conv_tol        = CONV_TOL,
                 λ_SCALE         = λ_SCALE,
+                cycle_spin      = CYCLE_SPIN,
                 use_gpu         = USE_GPU,
             )
             run_report(fn_out)
@@ -68,7 +70,8 @@ for ds in datasets
                 σ1A_PRECOMPUTED = σ1A_PRECOMPUTED,
                 mom             = MOM,
                 conv_tol        = CONV_TOL,
-                lambda_scale    = λ_SCALE)
+                lambda_scale    = λ_SCALE,
+                cycle_spin      = CYCLE_SPIN)
             run_report(fn_out)
         else
             @warn "Skipping $(ds.ksp): $(fn_out) exists with different parameters — shelve it first."

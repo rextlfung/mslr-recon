@@ -9,7 +9,7 @@ function _to_mat(v::Vector{<:Vector})
 end
 _to_mat(m::AbstractMatrix) = m
 
-function params_match(fn; NITERS, PATCH_SIZES, STRIDES, σ1A_PRECOMPUTED, mom, conv_tol=1e-5, lambda_scale=1.0)
+function params_match(fn; NITERS, PATCH_SIZES, STRIDES, σ1A_PRECOMPUTED, mom, conv_tol=1e-5, lambda_scale=1.0, cycle_spin=false)
     isfile(fn) || return false
     local f
     try; f = matopen(fn); catch; return false; end
@@ -25,6 +25,11 @@ function params_match(fn; NITERS, PATCH_SIZES, STRIDES, σ1A_PRECOMPUTED, mom, c
             read(f, "lambda_scale") ≈ lambda_scale || return false
         else
             lambda_scale ≈ 1.0 || return false
+        end
+        if haskey(f, "cycle_spin")
+            Bool(read(f, "cycle_spin")) == cycle_spin || return false
+        else
+            cycle_spin == false || return false
         end
         return true
     catch

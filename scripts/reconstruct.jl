@@ -68,6 +68,7 @@ function run_recon(;
     mom::Symbol       = :fpgm,
     conv_tol::Float64 = 1e-5,
     λ_SCALE::Float64  = 1.0,
+    cycle_spin::Bool  = false,
 )
     # ── GPU sanity check & device identification ──────────────────────────────
     if use_gpu
@@ -210,18 +211,16 @@ function run_recon(;
         )
     end
 
-    # TODO(cycle-spinning): Ong & Lustig mitigate block/patch boundary artifacts with *random
-    # cycle spinning* — randomly shift X each iteration, block-SVST, then unshift, so blocking
-    # artifacts average out over iterations (Figueiredo & Nowak 2003, IEEE TIP 12(8):906-916;
-    # see also Coifman & Donoho 1995). This code instead uses non-overlapping patches (exact
-    # prox) or fixed-overlap patches (LLR overlap-averaging). Random cycle spinning is important
-    # for artifact suppression but non-trivial to add (wrap patchSVST with a per-iteration random
-    # shift/unshift); deferred for now. See MATH_REVIEW.md "Future work".
-    #
     # patchSVST returns (thresholded_img, nuclear_norm) — the nuclear norm is the sum
     # of thresholded singular values, a free byproduct of the SVD already computed.
     # X[:,:,:,:,k] without @views creates an Array copy (CPU) or CuArray copy (GPU),
     # ensuring dispatch reaches the multi-threaded CPU path (not the streaming GPU path).
+    #
+    # cycle_spin=true: randomly shift each scale's volume before patchSVST and unshift
+    # afterward (Figueiredo & Nowak 2003, IEEE TIP 12(8):906-916; Coifman & Donoho 1995).
+    # Skipped for unit patches [1,1,1] — SVST is separable per voxel there, so the shift
+    # is a provable no-op. Non-deterministic; conv_tol early-stopping has a noise floor
+    # (rel_change reflects shift-to-shift variability, not convergence to a fixed point).
     g_prox = (X, c) -> begin
         # Force GC before the first scale's patch-tensor allocation to free any
         # lingering gradient intermediates from dc_cost_grad (image_sum, Ax, residual, g
@@ -229,7 +228,16 @@ function run_recon(;
         use_gpu && (GC.gc(true); CUDA.reclaim())
         reg = 0f0
         for k in 1:Nscales
-            result, cost = patchSVST(X[:, :, :, :, k], c * λs[k], PATCH_SIZES[k], STRIDES[k])
+            img_k = X[:, :, :, :, k]
+            psx, psy, psz = PATCH_SIZES[k]
+            if cycle_spin && !(psx == 1 && psy == 1 && psz == 1)
+                shift = (rand(0:Nx-1), rand(0:Ny-1), rand(0:Nz-1))
+                img_k = circshift(img_k, (shift..., 0))
+                result, cost = patchSVST(img_k, c * λs[k], PATCH_SIZES[k], STRIDES[k])
+                result = circshift(result, (-shift[1], -shift[2], -shift[3], 0))
+            else
+                result, cost = patchSVST(img_k, c * λs[k], PATCH_SIZES[k], STRIDES[k])
+            end
             @views X[:, :, :, :, k] = result
             reg += λs[k] * cost
         end
@@ -255,7 +263,10 @@ function run_recon(;
         println("  VRAM before FISTA: free=", round(free_b/1e9; digits=2),
                 " GB / total=", round(total_b/1e9; digits=2), " GB")
     end
-    println("\nIteratively reconstructing on $backend_str ($NITERS iterations, $Nscales scale(s), mom=$mom, conv_tol=$conv_tol) …")
+    if cycle_spin && conv_tol > 0
+        @warn "cycle_spin=true with conv_tol=$conv_tol: random shifts prevent convergence to a fixed point; rel_change has a noise floor and early-stopping will likely not fire. Set conv_tol=0 to disable."
+    end
+    println("\nIteratively reconstructing on $backend_str ($NITERS iterations, $Nscales scale(s), mom=$mom, conv_tol=$conv_tol, cycle_spin=$cycle_spin) …")
     # reg_cost at iter 0 (before any prox): computed once from the initial iterate.
     last_reg = Ref(reg_cost(use_gpu ? Array(X0) : X0))
     # From iter 1 onward, last_reg[] is updated for free inside g_prox — no extra SVDs.
@@ -313,6 +324,7 @@ function run_recon(;
         "device"       => device_str,
         "mom"          => String(mom),
         "conv_tol"     => conv_tol,
+        "cycle_spin"   => cycle_spin,
         "runtime_s"    => runtime_s,
         "iter_time_s"  => iter_time_s,
     ); compress=true)

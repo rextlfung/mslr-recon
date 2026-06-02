@@ -95,22 +95,22 @@ a nuclear-norm penalty on the (voxels × time) patch matrices of each component.
    full $f+g$ objective. Harmless in practice: the default `:gr` is correct and `:fr` is never
    selected. A clarifying comment was added at the restart block.
 
-3. **Random cycle spinning is not implemented (deferred — see Future work).**
+3. **Random cycle spinning is implemented** (`cycle_spin=true` in `run_recon`; default `false`). See below.
 
 4. **`σ1A_PRECOMPUTED = 1.0` vs the measured 0.968** overestimates $L$ by ~6.7%, giving a
    conservative (smaller) step. Safe and already documented. No change.
 
 ---
 
-## Future work
+## Random cycle spinning (implemented)
 
-- **Random cycle spinning.** Ong & Lustig suppress block-boundary artifacts by randomly
-  shifting the volume each iteration, applying block SVST, then unshifting, so artifacts
-  average out over iterations (Figueiredo & Nowak 2003, *IEEE TIP* 12(8):906–916; see also
-  Coifman & Donoho 1995). This code instead uses non-overlapping (exact-prox) or fixed-overlap
-  (LLR averaging) patches. Cycle spinning is important for artifact suppression but non-trivial
-  to add — it would wrap `patchSVST` with a per-iteration random shift/unshift. Tracked as
-  `TODO(cycle-spinning)` in `scripts/reconstruct.jl`.
+Each `g_prox` call draws an independent random spatial shift $(Δx, Δy, Δz)$ from $[0,N_x-1]\times[0,N_y-1]\times[0,N_z-1]$, applies `circshift` before `patchSVST`, then exactly inverts with `circshift` using the negated shift. Over many iterations the shifts are i.i.d., so patch-boundary artifacts average out in expectation (Figueiredo & Nowak 2003, *IEEE TIP* 12(8):906–916; Coifman & Donoho 1995). Unit patches `[1,1,1]` are excluded — SVST is separable per voxel there, making shift/unshift a provable no-op.
+
+**Convergence caveat.** Cycle spinning makes the proximal map stochastic: the iterates converge to a noise ball around the minimizer of the shift-averaged objective, not a fixed point. Consequently `rel_change` has a positive noise floor and `conv_tol` early-stopping will likely never fire. Set `conv_tol=0` when using `cycle_spin=true`; `run_recon` issues a `@warn` if both are active simultaneously. Ong & Lustig / BART do run FISTA + cycle spinning successfully, so the cost trace should still descend — verify on an actual run.
+
+**Reproducibility.** `cycle_spin=true` is non-deterministic (Julia's default RNG is not seeded by `run_recon`). Same parameters now give different outputs each run. `params_match` still caches correctly — it checks parameter equality, not output equality.
+
+## Future work
 
 - **Optional `log` → `log2`** in the `λ_k` formula (`reconstruct.jl` §7) for bit-level fidelity
   to the reference implementation. ⚠ Shifts $\lambda_k$ by ~2–3% and changes future recon
