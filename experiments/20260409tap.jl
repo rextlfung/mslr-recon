@@ -26,15 +26,15 @@ using .ReconCache
 
 const RECON_DIR  = "/StorageRAID/rexfung/20260409tap/recon"
 const FN_SMAPS   = joinpath(RECON_DIR, "smaps_bart.mat")
-const PATCH_SIZES       = [[90, 90, 60], [6,6,6], [1,1,1]]
+const PATCH_SIZES       = [[90,90,60], [6,6,6]]
 const STRIDES           = PATCH_SIZES # non-overlapping patches
 const NSCALES           = length(PATCH_SIZES)
 const NITERS            = 100 # max number of iterations
-const σ1A_PRECOMPUTED   = 1.0 # bounded by construction of encoding operator with unitary FFTs and normalized smaps
-const MOM               = :pogm # momentum
-const CONV_TOL          = 1e-2 # early stop tolerance for ||x_k - x_(k-1)||/||x_(k-1)||
-const λ_SCALE           = 1.0  # multiplicative scale applied to auto-computed regularization weights
-const USE_GPU           = false
+const σ1A_PRECOMPUTED   = 1.0 # upper-bound from unitary FFTs and normalized smaps
+const λ_SCALE           = 10.0 # multiplicative scale applied to auto-computed regularization weights
+const CONV_TOL          = 1e-3 # early stop tolerance for ||x_k - x_(k-1)||/||x_(k-1)||
+const MOM               = :fpgm # momentum
+const USE_GPU           = true
 
 datasets = [
     (ksp = "caipi_epi_zf.mat",    base = "mslr/caipi_recon"),

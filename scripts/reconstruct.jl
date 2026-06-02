@@ -238,12 +238,8 @@ function run_recon(;
     end
 
     # ── 9. Initialize X ──────────────────────────────────────────────────────
-    if use_gpu
-        X0 = CUDA.zeros(ComplexF32, Nx, Ny, Nz, Nt, Nscales)
-    else
-        X0 = zeros(ComplexF32, Nx, Ny, Nz, Nt, Nscales)
-    end
-    X0[:, :, :, :, 1] = A' * ksp
+    Atksp = (A' * ksp) ./ Nscales
+    X0 = repeat(Atksp, outer=(1, 1, 1, 1, Nscales))
     # A'*ksp leaves block-adjoint intermediates (one per time frame) GC-eligible but not yet
     # collected. Reclaim now so they don't inflate VRAM headroom during POGM.
     use_gpu && (GC.gc(true); CUDA.reclaim())
