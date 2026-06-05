@@ -216,7 +216,9 @@ function run_report(fn_recon; show_components=true, paradigm=nothing, t_thresh=5
         # full t-map: diverging map, clim at a robust cap (positive → red)
         p_t = jim(t_vol[:, end:-1:1, :];
                   title = "t-map (tap>rest, peak=$(round(act.peak_t; digits=1)))",
-                  color = cgrad(:RdBu; rev = true), clim = (-cap, cap))
+                  color = cgrad([:cyan, :blue, :black, :red, :yellow],
+                                [0.0, 0.45, 0.5, 0.55, 1.0]),
+                  clim = (-cap, cap))
         # suprathreshold positive activation: bright hot overlay so focal
         # clusters are visible despite being sparse
         t_pos = max.(t_vol, 0f0)
