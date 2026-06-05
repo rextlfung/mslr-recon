@@ -35,7 +35,7 @@ where:
 
 $$\lambda_k = \sqrt{p_k} + \sqrt{N_t} + \sqrt{\log\!\left(\frac{N_{vox} \cdot N_t}{\max(p_k,\, N_t)}\right)}$$
 
-where $p_k$ is the number of voxels in a patch at scale $k$. The paper specifies this weight only up to a constant (it is written with "$\sim$"), so the logarithm base is free: this code uses the natural log, whereas Ong & Lustig's reference MATLAB implementation uses $\log_2$ (giving a ~2–3% larger $\lambda_k$). The empirical `λ_SCALE` factor absorbs any global rescaling, so either base is consistent with the paper.
+where $p_k$ is the number of voxels in a patch at scale $k$. The paper specifies this weight only up to a constant (it is written with "$\sim$"), so the logarithm base is free: this code uses the natural log, whereas Ong & Lustig's reference MATLAB implementation uses $\log_2$ (giving a ~2–3% larger $\lambda_k$). The empirical `λ_GLOBAL` factor absorbs any global rescaling, so either base is consistent with the paper.
 
 Optimization uses `pogm_restart` (from `src/mirt_mod.jl`) with gradient restart. The momentum scheme is configurable via the `mom` parameter (`:fpgm` default, `:pogm` for the Proximal Optimized Gradient Method, `:pgm` for plain gradient descent). The Lipschitz constant is $L = N_{scales} \cdot \sigma_1(\mathcal{A})^2$.
 
@@ -121,6 +121,40 @@ Three artifacts are written to the same directory as the input `.mat`, with a fi
 - `<prefix>_report.txt` — short text summary: parameters used, convergence stats (iterations reached, restarts, final costs, final `‖Δx‖/‖x‖`), and image-quality stats (intensity range + tSNR).
 - `<prefix>_scale<k>.png` — per-scale mean magnitude (one per scale when `Nscales > 1`).
 
+#### Optional: task-activation summary
+
+For task fMRI, tSNR is a misleading quality metric — over-regularization shrinks
+temporal variance, *inflating* tSNR while suppressing the BOLD signal. Activation
+is the principled arbiter: static structural aliasing is temporally constant, so
+it projects onto the intercept regressor and **cannot inflate the task
+t-statistic**, whereas it directly inflates tSNR via the temporal mean. A
+barebones activation GLM (`src/activation.jl`) gives this metric. Pass a
+`paradigm` to `run_report`:
+
+```julia
+run_report(fn_recon; paradigm = (
+    tr        = 0.8f0,
+    onsets    = [collect(0f0:40f0:320f0), collect(20f0:40f0:320f0)],  # tap, rest (s)
+    durations = [fill(20f0, 9), fill(20f0, 9)],
+    contrast  = [1f0, -1f0, 0f0],                                     # tap > rest
+    n_discard = 0))
+```
+
+When supplied, the report gains an `── Activation ──` text block (peak *t*, voxels
+above `t_thresh`, mean top-1% *t*) and the figure expands to 2×3 with a t-map and a
+suprathreshold-activation panel. Default `paradigm = nothing` keeps the plain 2×2 report.
+
+This cleanly arbitrates **recon parameters at a fixed sampling pattern**.
+Comparing *across* sampling schemes (e.g. static-mask CAIPI vs time-varying) is
+still confounded — a static mask biases both tSNR and whole-brain suprathreshold
+count; use peak *t* at a fixed anatomical voxel there instead.
+
+This is a deliberately minimal arbiter for *ranking* recons — it has **no new
+dependencies** (Lanczos HRF, fixed-*t* cutoff, intensity-threshold brain mask) and
+its t-values match the full pipeline exactly (validated, *r* = 1.0). For
+publication-grade maps — BET masking, FDR correction, NIfTI/fsleyes export,
+orthogonal slice views — use the separate [`fmri-analysis`](https://github.com/your-username/fmri-analysis) repo.
+
 ---
 
 ## Writing an experiment file
@@ -141,7 +175,7 @@ run_recon(
     fn_recon        = "/data/my_experiment/recon.mat",
     PATCH_SIZES     = [[90,90,60], [10,10,10]],   # one component per scale
     STRIDES         = [[90,90,60], [10,10,10]],   # non-overlapping
-    σ1A_PRECOMPUTED = 1.0,               # set to `nothing` to compute via power iteration
+    σ1A = 1.0,                           # set to `nothing` to compute via power iteration
     use_gpu         = true,              # false for CPU
     mom             = :fpgm,            # :fpgm (default), :pogm, or :pgm
     # NITERS and conv_tol have defaults (200 and 1e-5); override if needed:
@@ -255,7 +289,7 @@ The length of the per-iteration traces is `Niters_run+1`, where `Niters_run ≤ 
 
 **λ is automatic.** The Ong & Lustig formula calibrates thresholds from patch geometry and Nt. It assumes the input k-space is prewhitened (σ_ksp ≈ 1) — BART's noise-prewhitening step satisfies this — so no manual tuning is needed.
 
-**Lipschitz constant.** `σ₁(A) ≤ 1.0` always — the unsubsampled operator is exactly unitary but subsampling reduces the spectral norm slightly (empirically `σ₁(A) ≈ 0.968` for the 20260409tap dataset). Set `σ1A_PRECOMPUTED = nothing` on the first run to measure it via power iteration (~20 min via `tests/sigma1A_test.jl`), then hard-code the result. Using `1.0` is safe (conservative step size) but ~6.7% suboptimal.
+**Lipschitz constant.** `σ₁(A) ≤ 1.0` always — the unsubsampled operator is exactly unitary but subsampling reduces the spectral norm slightly (empirically `σ₁(A) ≈ 0.968` for the 20260409tap dataset). Set `σ1A = nothing` on the first run to measure it via power iteration (~20 min via `tests/sigma1A_test.jl`), then hard-code the result. Using `1.0` is safe (conservative step size) but ~6.7% suboptimal.
 
 **Memory.** If VRAM is tight, reduce `Nscales` (each scale adds `N_opt × Nx·Ny·Nz·Nt × 8 B` to the optimizer buffer, where `N_opt` is 6 for `:fpgm`, 9 for `:pogm`) or reduce `Nvc` at the BART sensitivity-map compression step. The k-space term `3 × |ksp|` is fixed regardless of `Nscales` or `mom`. Switch to `use_gpu = false` to use RAM instead of VRAM; set `-t auto` to use all CPU threads for the patch SVDs.
 

@@ -1,7 +1,7 @@
 #=
 20260409tap.jl
 Experiment configuration for the 2026-04-08 finger-tapping dataset.
-2.4 mm isotropic, 21 virtual coils, Nt=387 frames.
+2.4 mm isotropic, 21 virtual coils, Nt=375 frames.
 Multi-scale LR decomposition: global + local + sparse scales, half-overlapping patches.
 Runs all 3 acquired datasets sequentially (caipi, caipi_ts, pd).
 
@@ -26,16 +26,28 @@ using .ReconCache
 
 const RECON_DIR  = "/StorageRAID/rexfung/20260409tap/recon"
 const FN_SMAPS   = joinpath(RECON_DIR, "smaps_bart.mat")
-const PATCH_SIZES       = [[90,90,60], [10,10,10]]
-const STRIDES           = PATCH_SIZES # non-overlapping patches
-const NSCALES           = length(PATCH_SIZES)
-const NITERS            = 100 # max number of iterations
-const σ1A_PRECOMPUTED   = 1.0 # upper-bound from unitary FFTs and normalized smaps
-const λ_SCALE           = 1.0 # multiplicative scale applied to auto-computed regularization weights
-const CONV_TOL          = 1e-3 # early stop tolerance for ||x_k - x_(k-1)||/||x_(k-1)||
-const MOM               = :fpgm # momentum
-const CYCLE_SPIN        = true
-const USE_GPU           = true
+const PATCH_SIZES       = [[90,90,60],[20,20,20],[6,6,6]] # global + local + local
+const STRIDES           = [cld.(ps, 2) for ps in PATCH_SIZES] # half-overlapping patches
+const NSCALES           = length(PATCH_SIZES) # number of scales
+const CYCLE_SPIN        = true # random cycle spin for shift-invariant regularization
+const σ1A               = 1.0 # upper-bound from unitary FFTs and normalized smaps
+const λ_GLOBAL          = 3.0 # global tuner for regularization weights
+const NITERS            = 100 # number of iterations
+const TOL               = 1e-3 # early stop tolerance for ||x_k - x_(k-1)||/||x_(k-1)||
+const USE_GPU           = true # GPU acceleration
+const MOMENTUM          = :fpgm # momentum
+
+# Task paradigm for the optional barebones activation report (tap > rest).
+# Acquisition metadata, kept here so the recon repo has no dependency on the
+# separate fmri-analysis repo. Mirrors ../fmri-analysis/experiments/20260409tap.jl.
+# Set to `nothing` to skip activation and emit the plain 2×2 report.
+const PARADIGM = (
+    tr        = 0.8f0,
+    onsets    = [collect(0.0f0:40.0f0:320.0f0), collect(20.0f0:40.0f0:320.0f0)],
+    durations = [fill(20.0f0, 9), fill(20.0f0, 9)],
+    contrast  = [1.0f0, -1.0f0, 0.0f0],   # tap, rest, intercept
+    n_discard = 0,                        # these recons are pre-trimmed (Nt=375)
+)
 
 datasets = [
     (ksp = "pd_epi_zf.mat",       base = "mslr/pd_recon"),
@@ -55,24 +67,24 @@ for ds in datasets
                 PATCH_SIZES     = PATCH_SIZES,
                 STRIDES         = STRIDES,
                 NITERS          = NITERS,
-                σ1A_PRECOMPUTED = σ1A_PRECOMPUTED,
-                mom             = MOM,
-                conv_tol        = CONV_TOL,
-                λ_SCALE         = λ_SCALE,
+                σ1A             = σ1A,
+                mom             = MOMENTUM,
+                conv_tol        = TOL,
+                λ_GLOBAL        = λ_GLOBAL,
                 cycle_spin      = CYCLE_SPIN,
                 use_gpu         = USE_GPU,
             )
-            run_report(fn_out)
+            run_report(fn_out; paradigm = PARADIGM)
         elseif params_match(fn_out;
                 NITERS          = NITERS,
                 PATCH_SIZES     = PATCH_SIZES,
                 STRIDES         = STRIDES,
-                σ1A_PRECOMPUTED = σ1A_PRECOMPUTED,
-                mom             = MOM,
-                conv_tol        = CONV_TOL,
-                lambda_scale    = λ_SCALE,
+                σ1A             = σ1A,
+                mom             = MOMENTUM,
+                conv_tol        = TOL,
+                lambda_global   = λ_GLOBAL,
                 cycle_spin      = CYCLE_SPIN)
-            run_report(fn_out)
+            run_report(fn_out; paradigm = PARADIGM)
         else
             @warn "Skipping $(ds.ksp): $(fn_out) exists with different parameters — shelve it first."
         end

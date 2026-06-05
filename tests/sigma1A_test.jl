@@ -51,7 +51,7 @@ println()
 println("  σ₁(A) = $(round(σ1A; digits=6))")
 println()
 if σ1A <= 1.0 + 1e-3
-    println("✓  σ₁(A) ≤ 1.0 as expected — update σ1A_PRECOMPUTED = $(round(σ1A; digits=6)) in the experiment file")
+    println("✓  σ₁(A) ≤ 1.0 as expected — update σ1A = $(round(σ1A; digits=6)) in the experiment file")
 else
     println("✗  σ₁(A) > 1.0 — sensitivity maps are not properly normalized")
 end

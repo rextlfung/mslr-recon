@@ -6,7 +6,7 @@ Defines module Reconstruct with a single entry point:
 
     run_recon(; fn_ksp, fn_smaps, fn_recon,
                 PATCH_SIZES, STRIDES, NITERS=200,
-                σ1A_PRECOMPUTED, use_gpu=false, mom=:fpgm, conv_tol=1e-5)
+                σ1A, use_gpu=false, mom=:fpgm, conv_tol=1e-5)
 
 GPU acceleration (use_gpu=true):
   Requires CUDA.jl (add it with: ] add CUDA)
@@ -63,11 +63,11 @@ function run_recon(;
     PATCH_SIZES::Vector,
     STRIDES::Vector,
     NITERS::Int       = 200,
-    σ1A_PRECOMPUTED::Union{Float64,Nothing},
+    σ1A::Union{Float64,Nothing},
     use_gpu::Bool     = false,
     mom::Symbol       = :fpgm,
     conv_tol::Float64 = 1e-5,
-    λ_SCALE::Float64  = 1.0,
+    λ_GLOBAL::Float64 = 1.0,
     cycle_spin::Bool  = false,
 )
     # ── GPU sanity check & device identification ──────────────────────────────
@@ -159,12 +159,10 @@ function run_recon(;
 
 
     # ── 6. Lipschitz constant ─────────────────────────────────────────────────
-    if isnothing(σ1A_PRECOMPUTED)
+    if isnothing(σ1A)
         println("Computing σ₁(A) via power iteration (may take ~20 min) …")
         _, σ1A = poweriter(undim(A))
         println("  σ₁(A) = ", round(σ1A; digits=4))
-    else
-        σ1A = σ1A_PRECOMPUTED
     end
     L = Nscales * σ1A^2
 
@@ -175,7 +173,7 @@ function run_recon(;
     # block being p_k × Nt so M·N = N_vox·Nt. The log ARGUMENT matches Ong's reference code
     # exactly (their bs·min(m,n) = MN/max(m,n)). The paper states the weight only up to a
     # constant ("~"), so the log BASE is unspecified: we use natural log, whereas Ong's MATLAB
-    # reference uses log2 (≈1.20× larger third term ⇒ ~2–3% higher λ overall). λ_SCALE absorbs
+    # reference uses log2 (≈1.20× larger third term ⇒ ~2–3% higher λ overall). λ_GLOBAL absorbs
     # any global rescaling, so natural log is consistent with the paper; switch to log2 only if
     # you want bit-level fidelity to the reference implementation.
     # Formula assumes unit-variance noise in image space. BART prewhitening gives
@@ -187,7 +185,7 @@ function run_recon(;
         sqrt(log(N_voxels * Nt / max(prod(PATCH_SIZES[k]), Nt)))
         for k in 1:Nscales
     ]
-    λs .*= Float32(λ_SCALE)
+    λs .*= Float32(λ_GLOBAL)
     println("Regularization weights λs = ", round.(λs; digits=6))
 
 
@@ -219,8 +217,8 @@ function run_recon(;
     # cycle_spin=true: randomly shift each scale's volume before patchSVST and unshift
     # afterward (Figueiredo & Nowak 2003, IEEE TIP 12(8):906-916; Coifman & Donoho 1995).
     # Skipped for unit patches [1,1,1] — SVST is separable per voxel there, so the shift
-    # is a provable no-op. Non-deterministic; conv_tol early-stopping has a noise floor
-    # (rel_change reflects shift-to-shift variability, not convergence to a fixed point).
+    # is a provable no-op. Non-deterministic; random shifts inflate rel_change, potentially
+    # preventing early stopping (rel_change reflects shift-to-shift variability).
     g_prox = (X, c) -> begin
         # Force GC before the first scale's patch-tensor allocation to free any
         # lingering gradient intermediates from dc_cost_grad (image_sum, Ax, residual, g
@@ -264,7 +262,7 @@ function run_recon(;
                 " GB / total=", round(total_b/1e9; digits=2), " GB")
     end
     if cycle_spin && conv_tol > 0
-        @warn "cycle_spin=true with conv_tol=$conv_tol: random shifts prevent convergence to a fixed point; rel_change has a noise floor and early-stopping will likely not fire. Set conv_tol=0 to disable."
+        @warn "cycle_spin=true with conv_tol=$conv_tol: random shifts inflate rel_change, potentially preventing early stopping. Set conv_tol=0 to disable."
     end
     println("\nIteratively reconstructing on $backend_str ($NITERS iterations, $Nscales scale(s), mom=$mom, conv_tol=$conv_tol, cycle_spin=$cycle_spin) …")
     # reg_cost at iter 0 (before any prox): computed once from the initial iterate.
@@ -318,7 +316,7 @@ function run_recon(;
         "patch_sizes"  => PATCH_SIZES,
         "strides"      => STRIDES,
         "lambdas"      => λs,
-        "lambda_scale" => λ_SCALE,
+        "lambda_global" => λ_GLOBAL,
         "Niters"       => NITERS,
         "used_gpu"     => use_gpu,
         "device"       => device_str,

@@ -88,7 +88,7 @@ a nuclear-norm penalty on the (voxels × time) patch matrices of each component.
    third term by $\sqrt{\ln 2}\approx0.83$ (reference term ~1.20× larger) — a **~2–3% net
    change in $\lambda_k$**, since $\sqrt{N_t}$ dominates the log term (and $\sqrt{p_k}$
    dominates at the global scale). Natural log is consistent with the paper, and the empirical
-   `λ_SCALE` absorbs global rescaling. Switching to `log2` is an optional fidelity tweak only.
+   `λ_GLOBAL` absorbs global rescaling. Switching to `log2` is an optional fidelity tweak only.
 
 2. **`restart=:fr` is latent-inconsistent.** Function restart compares `Fcost` (the smooth
    data term passed by `reconstruct.jl`) and so would restart on the data term alone, not the
@@ -97,7 +97,7 @@ a nuclear-norm penalty on the (voxels × time) patch matrices of each component.
 
 3. **Random cycle spinning is implemented** (`cycle_spin=true` in `run_recon`; default `false`). See below.
 
-4. **`σ1A_PRECOMPUTED = 1.0` vs the measured 0.968** overestimates $L$ by ~6.7%, giving a
+4. **`σ1A = 1.0` vs the measured 0.968** overestimates $L$ by ~6.7%, giving a
    conservative (smaller) step. Safe and already documented. No change.
 
 ---

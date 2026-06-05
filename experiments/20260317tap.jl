@@ -28,9 +28,9 @@ const FN_SMAPS    = joinpath(RECON_DIR, "smaps_bart.mat")
 const PATCH_SIZES       = [[90, 90, 60], [6, 6, 6], [1, 1, 1]]
 const STRIDES           = [[45, 45, 30], [3, 3, 3], [1, 1, 1]]   # half-overlapping
 const NITERS            = 50
-const σ1A_PRECOMPUTED   = 1.0
-const MOM               = :fpgm
-const CONV_TOL          = 1e-5
+const σ1A               = 1.0
+const MOMENTUM          = :fpgm
+const TOL               = 1e-5
 
 fn_out = joinpath(RECON_DIR, "caipi_recon.mat")
 try
@@ -43,9 +43,9 @@ try
             PATCH_SIZES     = PATCH_SIZES,
             STRIDES         = STRIDES,
             NITERS          = NITERS,
-            σ1A_PRECOMPUTED = σ1A_PRECOMPUTED,
-            mom             = MOM,
-            conv_tol        = CONV_TOL,
+            σ1A             = σ1A,
+            mom             = MOMENTUM,
+            conv_tol        = TOL,
             use_gpu         = false,    # ← set false for CPU
         )
         run_report(fn_out)
@@ -53,9 +53,9 @@ try
             NITERS          = NITERS,
             PATCH_SIZES     = PATCH_SIZES,
             STRIDES         = STRIDES,
-            σ1A_PRECOMPUTED = σ1A_PRECOMPUTED,
-            mom             = MOM,
-            conv_tol        = CONV_TOL)
+            σ1A             = σ1A,
+            mom             = MOMENTUM,
+            conv_tol        = TOL)
         run_report(fn_out)
     else
         @warn "Skipping caipi_epi_zf.mat: $(fn_out) exists with different parameters — shelve it first."

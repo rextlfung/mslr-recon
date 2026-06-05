@@ -26,6 +26,8 @@ using LaTeXStrings
 
 include(joinpath(@__DIR__, "..", "src", "analysis.jl"))
 using .Analysis
+include(joinpath(@__DIR__, "..", "src", "activation.jl"))
+using .ActivationGLM
 
 _fmt_vec(v) = "[" * join(Int.(v), ", ") * "]"
 
@@ -35,7 +37,7 @@ function _format_summary(; fn_recon, Nx, Ny, Nz, Nt, R, σ1A, L_val,
         used_gpu, device, runtime_s, mom_str, conv_tol, cycle_spin,
         dc_final, reg_final, rel_change_final,
         img_min, img_max, img_mean, img_std,
-        mean_tsnr, peak_tsnr)
+        mean_tsnr, peak_tsnr, act=nothing)
     device_label = if device !== nothing
         device
     elseif used_gpu === nothing
@@ -87,11 +89,20 @@ function _format_summary(; fn_recon, Nx, Ny, Nz, Nt, R, σ1A, L_val,
     @printf(io, "  |X_recon|:    min = %.3g, mean = %.3g, max = %.3g, std = %.3g\n",
             img_min, img_mean, img_max, img_std)
     @printf(io, "  tSNR:         mean = %.2f, peak = %.2f\n", mean_tsnr, peak_tsnr)
+    if act !== nothing
+        println(io)
+        println(io, "── Activation (tap > rest, barebones GLM) ─────────────")
+        @printf(io, "  Peak t:       %.2f  (peak |t| = %.2f)\n", act.peak_t, act.peak_abs)
+        @printf(io, "  Voxels t>%.1f: %d  (%.2f%% of %d brain voxels)\n",
+                act.t_thresh, act.n_supra, act.pct_supra, act.nvox)
+        @printf(io, "  Mean top-1%% t: %.2f\n", act.mean_top1)
+        println(io, "  (quick-look metric; use fmri-analysis for BET mask + FDR)")
+    end
     return String(take!(io))
 end
 
 
-function run_report(fn_recon; show_components=true)
+function run_report(fn_recon; show_components=true, paradigm=nothing, t_thresh=5.0)
     isfile(fn_recon) || error("File not found: $fn_recon")
 
     prefix = joinpath(dirname(fn_recon), splitext(basename(fn_recon))[1])
@@ -148,6 +159,15 @@ function run_report(fn_recon; show_components=true)
         isempty(finite_rc) ? nothing : last(finite_rc)
     end
 
+    # ── Task activation (optional; only when a paradigm is supplied) ───────────
+    t_vol = nothing
+    act   = nothing
+    if paradigm !== nothing
+        println("Computing task-activation t-map (tap > rest) …")
+        t_vol, brain_mask, _ = activation_tmap(X_recon, paradigm)
+        act = activation_summary(t_vol, brain_mask; t_thresh)
+    end
+
     # ── Text summary ──────────────────────────────────────────────────────────
     summary = _format_summary(;
         fn_recon, Nx, Ny, Nz, Nt, R, σ1A, L_val,
@@ -157,7 +177,7 @@ function run_report(fn_recon; show_components=true)
         dc_final = dc_costs[end], reg_final = reg_costs[end],
         rel_change_final,
         img_min, img_max, img_mean, img_std,
-        mean_tsnr, peak_tsnr,
+        mean_tsnr, peak_tsnr, act,
     )
     print(summary)
     write("$(prefix)_report.txt", summary)
@@ -190,8 +210,25 @@ function run_report(fn_recon; show_components=true)
                  title = "tSNR  (mean=$(round(mean_tsnr; digits=1)), peak=$(round(peak_tsnr; digits=1)))",
                  color = :inferno)
 
-    p_report = plot(p_conv, p_rc, p_mag, p_tsnr;
-                    layout = (2, 2), size = (1400, 900))
+    panels = Any[p_conv, p_rc, p_mag, p_tsnr]
+    if act !== nothing
+        cap = max(act.cap, eps(Float32))
+        # full t-map: diverging map, clim at a robust cap (positive → red)
+        p_t = jim(t_vol[:, end:-1:1, :];
+                  title = "t-map (tap>rest, peak=$(round(act.peak_t; digits=1)))",
+                  color = cgrad(:RdBu; rev = true), clim = (-cap, cap))
+        # suprathreshold positive activation: bright hot overlay so focal
+        # clusters are visible despite being sparse
+        t_pos = max.(t_vol, 0f0)
+        t_pos[t_pos .< Float32(t_thresh)] .= 0f0
+        p_tthr = jim(t_pos[:, end:-1:1, :];
+                     title = "t>$(t_thresh)  (n=$(act.n_supra), $(round(act.pct_supra; digits=1))%)",
+                     color = :inferno, clim = (Float32(t_thresh), max(act.peak_t, 2f0 * Float32(t_thresh))))
+        push!(panels, p_t, p_tthr)
+    end
+    layout = act === nothing ? (2, 2) : (2, 3)
+    figsize = act === nothing ? (1400, 900) : (2000, 900)
+    p_report = plot(panels...; layout = layout, size = figsize)
     display(p_report)
     savefig(p_report, "$(prefix)_report.png")
 
