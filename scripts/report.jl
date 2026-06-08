@@ -211,26 +211,7 @@ function run_report(fn_recon; show_components=true, paradigm=nothing, t_thresh=5
                  color = :inferno)
 
     panels = Any[p_conv, p_rc, p_mag, p_tsnr]
-    if act !== nothing
-        cap = max(act.cap, eps(Float32))
-        # full t-map: diverging map, clim at a robust cap (positive → red)
-        p_t = jim(t_vol[:, end:-1:1, :];
-                  title = "t-map (tap>rest, peak=$(round(act.peak_t; digits=1)))",
-                  color = cgrad([:cyan, :blue, :black, :red, :yellow],
-                                [0.0, 0.45, 0.5, 0.55, 1.0]),
-                  clim = (-cap, cap))
-        # suprathreshold positive activation: bright hot overlay so focal
-        # clusters are visible despite being sparse
-        t_pos = max.(t_vol, 0f0)
-        t_pos[t_pos .< Float32(t_thresh)] .= 0f0
-        p_tthr = jim(t_pos[:, end:-1:1, :];
-                     title = "t>$(t_thresh)  (n=$(act.n_supra), $(round(act.pct_supra; digits=1))%)",
-                     color = :inferno, clim = (Float32(t_thresh), max(act.peak_t, 2f0 * Float32(t_thresh))))
-        push!(panels, p_t, p_tthr)
-    end
-    layout = act === nothing ? (2, 2) : (2, 3)
-    figsize = act === nothing ? (1400, 900) : (2000, 900)
-    p_report = plot(panels...; layout = layout, size = figsize)
+    p_report = plot(panels...; layout = (2, 2), size = (1400, 900))
     display(p_report)
     savefig(p_report, "$(prefix)_report.png")
 
