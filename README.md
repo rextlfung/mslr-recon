@@ -54,7 +54,7 @@ mslr-recon/
 │
 ├── scripts/
 │   ├── reconstruct.jl        # Reconstruction module — called by experiment files
-│   └── analyze.jl            # Post-reconstruction reporting (`run_report`)
+│   └── report.jl             # Post-reconstruction reporting (`run_report`)
 │
 ├── utils/
 │   └── recon_cache.jl        # `params_match`: skips recomputation when saved params match
@@ -108,7 +108,7 @@ Set `use_gpu = true` or `false` inside the experiment file to choose the backend
 ### Generating a report
 
 ```bash
-julia scripts/analyze.jl /path/to/recon.mat
+julia scripts/report.jl /path/to/recon.mat
 ```
 
 Optional flags:

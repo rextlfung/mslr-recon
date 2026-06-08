@@ -18,7 +18,7 @@ Pkg.activate(joinpath(@__DIR__, ".."))
 
 using Revise
 Revise.includet(joinpath(@__DIR__, "..", "scripts", "reconstruct.jl"))
-Revise.includet(joinpath(@__DIR__, "..", "scripts", "analyze.jl"))
+Revise.includet(joinpath(@__DIR__, "..", "scripts", "report.jl"))
 Revise.includet(joinpath(@__DIR__, "..", "utils", "recon_cache.jl"))
 using .Reconstruct
 using .ReconCache

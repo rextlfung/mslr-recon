@@ -1,9 +1,9 @@
 #=
-analyze.jl
+report.jl
 Post-reconstruction reporting.
 
 Usage:
-    julia scripts/analyze.jl /path/to/recon_Nscales.mat [--no-components]
+    julia scripts/report.jl /path/to/recon_Nscales.mat [--no-components]
 
 Produces (in the same directory as the input .mat):
     <basename>_report.png   — convergence + rel_change + mean_mag + tSNR
@@ -254,7 +254,7 @@ end
 
 if abspath(PROGRAM_FILE) == @__FILE__
     if isempty(ARGS) || ARGS[1] in ("-h", "--help")
-        println("Usage: julia scripts/analyze.jl <recon_file.mat> [--no-components]")
+        println("Usage: julia scripts/report.jl <recon_file.mat> [--no-components]")
         exit(0)
     end
     run_report(ARGS[1]; show_components = !("--no-components" in ARGS))

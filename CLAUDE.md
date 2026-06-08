@@ -21,8 +21,8 @@ julia experiments/<experiment>.jl
 
 **Generate a reconstruction report:**
 ```bash
-julia scripts/analyze.jl /path/to/recon.mat
-julia scripts/analyze.jl /path/to/recon.mat --no-components
+julia scripts/report.jl /path/to/recon.mat
+julia scripts/report.jl /path/to/recon.mat --no-components
 ```
 Writes `<prefix>_report.png` (2×2: convergence, rel_change, mean magnitude, tSNR), `<prefix>_report.txt` (parameters + convergence + image-quality summary), and `<prefix>_scale<k>.png` per scale into the same directory as the input `.mat`.
 
@@ -79,9 +79,9 @@ The reconstruction uses `pogm_restart` from `src/mirt_mod.jl`. The momentum sche
 
 `pogm_restart` is a modified port of `MIRT.pogm_restart`. `MIRT.pogm_restart` cannot run on GPU because it allocates gradients with `zeros(size(x0))` (creates a CPU Float64 array), uses Float64 scalar literals that would promote `CuArray{ComplexF32}` to `ComplexF64`, and uses `real(-Fgrad .* ynew_yold)` which allocates large intermediate CuArrays. `mirt_mod.jl` fixes all three, and additionally adds early stopping via `conv_tol`. Progress display is driven by `@showprogress` inside `pogm_restart`. The `fun` callback is invoked with `(iter, xk, yk, is_restart, Fcostnew, rel_change)` — one more positional arg than upstream MIRT, where `rel_change` is the per-iteration `‖Δx‖/‖x‖` (NaN at iter 0). `reconstruct.jl`'s logger returns `(Fcostnew, last_reg[], is_restart, rel_change)`, which are collected into the `costs` array and unpacked into `dc_costs`, `reg_costs`, `restarts`, `rel_changes` for saving/plotting.
 
-### `scripts/analyze.jl` and `src/analysis.jl`
+### `scripts/report.jl` and `src/analysis.jl`
 
-`src/analysis.jl` provides reusable utilities (`tSNR`, `plotOpt`). `scripts/analyze.jl` defines `run_report(fn_recon; show_components=true)`, which loads a recon `.mat` and writes three artifacts to the same directory as the input `.mat`, with a filename prefix derived from its basename:
+`src/analysis.jl` provides reusable utilities (`tSNR`, `plotOpt`). `scripts/report.jl` defines `run_report(fn_recon; show_components=true)`, which loads a recon `.mat` and writes three artifacts to the same directory as the input `.mat`, with a filename prefix derived from its basename:
 - `<prefix>_report.png` — single 2×2 figure: convergence, relative iterate change (log-y, with `conv_tol` reference line), mean magnitude montage, tSNR montage.
 - `<prefix>_report.txt` — parameters + convergence + image-quality stats.
 - `<prefix>_scale<k>.png` — per-scale mean magnitude (omitted when `show_components=false` or `Nscales == 1`).
