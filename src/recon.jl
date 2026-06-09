@@ -47,6 +47,7 @@ function img2patches(img::AbstractArray{<:Any,4}, patch_size, stride_size)
     psx, psy, psz   = patch_size
     ssx, ssy, ssz   = stride_size
 
+    all(>(0), stride_size) || throw(ArgumentError("stride_size elements must be positive, got $stride_size"))
     psx = min(psx, Nx); psy = min(psy, Ny); psz = min(psz, Nz)
 
     Nsteps_x = cld(Nx - psx, ssx)
@@ -83,7 +84,8 @@ Works on both CPU Arrays and GPU CuArrays.
 # Returns
 - `img`: 4-D array `(Nx, Ny, Nz, Nt)`, same array type as `P`
 """
-function patches2img(P::AbstractArray, patch_size, stride_size, og_size::NTuple{3})
+function patches2img(P::AbstractArray, patch_size, stride_size, og_size::NTuple{3};
+                     pcount=nothing)
     _, Nt, _ = size(P)
     psx, psy, psz = patch_size
     ssx, ssy, ssz = stride_size
@@ -95,8 +97,10 @@ function patches2img(P::AbstractArray, patch_size, stride_size, og_size::NTuple{
     Nsteps_y = cld(Ny - psy, ssy)
     Nsteps_z = cld(Nz - psz, ssz)
 
-    img    = fill!(similar(P, ComplexF32, Nx, Ny, Nz, Nt),  zero(ComplexF32))
-    Pcount = fill!(similar(P, Float32,   Nx, Ny, Nz),       zero(Float32))
+    img    = fill!(similar(P, ComplexF32, Nx, Ny, Nz, Nt), zero(ComplexF32))
+    Pcount = pcount !== nothing ?
+        fill!(pcount, zero(Float32)) :
+        fill!(similar(P, Float32, Nx, Ny, Nz), zero(Float32))
 
     ip = 1
     for iz in 0:Nsteps_z, iy in 0:Nsteps_y, ix in 0:Nsteps_x
@@ -236,7 +240,7 @@ CPU (`Array`) path builds the full patch tensor and uses `@threads`.
 GPU (`AbstractArray`) path streams one patch at a time — avoids the O(Np) tensor
 allocation, which can exceed 10 GB for moderate patch sizes on large volumes.
 """
-function patchSVST(img::Array{<:Any,4}, β, patch_size, stride_size)
+function patchSVST(img::Array{<:Any,4}, β, patch_size, stride_size; pcount=nothing)
     Nx, Ny, Nz, _ = size(img)
     psx, psy, psz = min(patch_size[1], Nx), min(patch_size[2], Ny), min(patch_size[3], Nz)
     if psx == 1 && psy == 1 && psz == 1
@@ -244,13 +248,14 @@ function patchSVST(img::Array{<:Any,4}, β, patch_size, stride_size)
     end
     P   = img2patches(img, patch_size, stride_size)
     reg = _svst_loop!(P, β, size(P, 3))
-    return patches2img(P, patch_size, stride_size, size(img)[1:3]), reg
+    return patches2img(P, patch_size, stride_size, size(img)[1:3]; pcount), reg
 end
 
-function patchSVST(img::AbstractArray{<:Any,4}, β, patch_size, stride_size)
+function patchSVST(img::AbstractArray{<:Any,4}, β, patch_size, stride_size; pcount=nothing)
     Nx, Ny, Nz, Nt = size(img)
     psx, psy, psz   = patch_size
     ssx, ssy, ssz   = stride_size
+    all(>(0), stride_size) || throw(ArgumentError("stride_size elements must be positive, got $stride_size"))
     psx = min(psx, Nx); psy = min(psy, Ny); psz = min(psz, Nz)
 
     if psx == 1 && psy == 1 && psz == 1
@@ -261,7 +266,9 @@ function patchSVST(img::AbstractArray{<:Any,4}, β, patch_size, stride_size)
     Nsteps_y = cld(Ny - psy, ssy)
     Nsteps_z = cld(Nz - psz, ssz)
     img_out = fill!(similar(img, ComplexF32, Nx, Ny, Nz, Nt), zero(ComplexF32))
-    Pcount  = fill!(similar(img, Float32,   Nx, Ny, Nz),       zero(Float32))
+    Pcount  = pcount !== nothing ?
+        fill!(pcount, zero(Float32)) :
+        fill!(similar(img, Float32, Nx, Ny, Nz), zero(Float32))
     reg = 0f0
     for iz in 0:Nsteps_z, iy in 0:Nsteps_y, ix in 0:Nsteps_x
         sx = min(ix*ssx + 1, Nx - psx + 1)

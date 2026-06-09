@@ -18,8 +18,10 @@ with the following changes:
   4. znew momentum update uses fused @. broadcast (1 allocation) instead of chained
      arithmetic (3–4 intermediate CuArrays of ~4.2 GB each for a 3-scale
      (90,90,60,387) reconstruction) that would OOM a 48 GB GPU.
-  5. Fgrad is pre-allocated and updated in-place; ynew_yold is pre-allocated for
-     the _gr_restart call; Fgradold/Fgrad are swapped (not aliased) each iteration.
+  5. For :pogm: Fgrad and ynew_yold are pre-allocated; Fgrad is updated in-place
+     (@. broadcast) and Fgradold/Fgrad are swapped each iteration to avoid aliasing.
+     For :fpgm/:pgm: Fgrad is rebound to a new array each iteration (the :pogm
+     swap optimization is not needed and those branches are not reached).
 
   6. Early stopping via conv_tol: halts when the relative image-iterate change
      ‖x_new − x_prev‖_F / ‖x_prev‖_F < conv_tol, where x is the proximal-step output
@@ -264,7 +266,7 @@ function poweriter(
         ratio = norm(Ax) / norm(x)
         if abs(ratio - ratio_old) / ratio < tol
             chat && @info "Power iteration converged at iter $iter"
-            break
+            return x, ratio   # ratio already computed; avoids a redundant A*x
         end
         ratio_old = ratio
         x = A' * Ax

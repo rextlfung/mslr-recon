@@ -219,6 +219,11 @@ function run_recon(;
     # Skipped for unit patches [1,1,1] — SVST is separable per voxel there, so the shift
     # is a provable no-op. Non-deterministic; random shifts inflate rel_change, potentially
     # preventing early stopping (rel_change reflects shift-to-shift variability).
+
+    # Pre-allocate one overlap-count buffer per scale (reused each g_prox call).
+    # similar(smaps, ...) produces a CuArray on GPU or Array on CPU.
+    pcounts = [fill!(similar(smaps, Float32, Nx, Ny, Nz), 0f0) for _ in 1:Nscales]
+
     g_prox = (X, c) -> begin
         # Force GC before the first scale's patch-tensor allocation to free any
         # lingering gradient intermediates from dc_cost_grad (image_sum, Ax, residual, g
@@ -231,10 +236,10 @@ function run_recon(;
             if cycle_spin && !(psx == 1 && psy == 1 && psz == 1)
                 shift = (rand(0:Nx-1), rand(0:Ny-1), rand(0:Nz-1))
                 img_k = circshift(img_k, (shift..., 0))
-                result, cost = patchSVST(img_k, c * λs[k], PATCH_SIZES[k], STRIDES[k])
+                result, cost = patchSVST(img_k, c * λs[k], PATCH_SIZES[k], STRIDES[k]; pcount=pcounts[k])
                 result = circshift(result, (-shift[1], -shift[2], -shift[3], 0))
             else
-                result, cost = patchSVST(img_k, c * λs[k], PATCH_SIZES[k], STRIDES[k])
+                result, cost = patchSVST(img_k, c * λs[k], PATCH_SIZES[k], STRIDES[k]; pcount=pcounts[k])
             end
             @views X[:, :, :, :, k] = result
             reg += λs[k] * cost

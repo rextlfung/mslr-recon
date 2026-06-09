@@ -204,7 +204,7 @@ function activation_tmap(X4d::AbstractArray{<:Number,4}, paradigm; brain_mask=no
     t_brain = compute_tscores(beta, residuals, XtXinv, paradigm.contrast)
 
     t_flat = zeros(Float32, nx * ny * nz)
-    t_flat[bm_flat] .= t_brain
+    t_flat[bm_flat] .= Float32.(t_brain)
     return reshape(t_flat, nx, ny, nz), brain_mask, nt - size(Xd, 2)
 end
 
