@@ -66,7 +66,7 @@ The sampling mask `Ω` is moved to GPU (`cu(Ω)`) alongside k-space so that k-sp
 5. Build block-diagonal SENSE operator `A` (one block per time frame).
 6. Flatten and mask k-space to `(K, Nc, Nt)`.
 7. Compute or reuse Lipschitz constant `L = Nscales × σ₁(A)²`.
-8. Compute per-scale regularization weights `λ_k` via the Ong & Lustig formula. Input k-space is assumed to be prewhitened by BART (σ_ksp ≈ 1); since A is approximately unitary, σ_image ≈ 1 and the formula applies directly with no correction. The log term uses natural log here (Ong's reference code uses `log2`; ~2–3% effect on `λ_k`, absorbed by `λ_GLOBAL`). See `MATH_REVIEW.md` for the full correctness audit.
+8. Compute per-scale regularization weights `λ_k` via the Ong & Lustig formula. Input k-space is assumed to be prewhitened by BART (σ_ksp ≈ 1); since A is approximately unitary, σ_image ≈ 1 and the formula applies directly with no correction. The log term uses natural log here (Ong's reference code uses `log2`; ~2–3% effect on `λ_k`, absorbed by `λ_GLOBAL`). See [Math correctness](#math-correctness) below for the full audit.
 9. Initialize `X0` by setting every scale slice to `(A' * ksp) / Nscales`, so the sum across scales equals the adjoint reconstruction.
 10. Run `pogm_restart` (from `src/mirt_mod.jl`) with the momentum scheme selected by the `mom` parameter (default `:fpgm`; `:pogm` and `:pgm` also supported) and the patch-SVST proximal operator applied independently to each scale component; if `cycle_spin=true` (default `false`), each scale's volume is randomly `circshift`-ed in the spatial dimensions before `patchSVST` and exactly unshifted afterward — boundary artifacts average out over iterations (Figueiredo & Nowak 2003); unit patches `[1,1,1]` are excluded (shift is a no-op there). Progress is shown via `@showprogress` inside `pogm_restart`. The relative iterate change `‖x_new − x_prev‖_F / ‖x_prev‖_F` is computed every iteration (reusing already-live `yold`/`xold`) and logged via the `fun` callback. Early stopping fires when it falls below `conv_tol` (default `1e-5`) for the first time after `adaptive_cmi` iterations have elapsed since the last gradient restart, where `adaptive_cmi` starts at `conv_min_iter` (default 10) and decrements by 1 each time a restart fires (floored at 1). The decay prevents a chain of restarts near convergence from permanently blocking early stopping, while the initial value preserves the full grace period during genuine optimization progress. The iterate compared is the prox-step output (ynew for `:fpgm`/`:pgm`, xnew for `:pogm`); set `conv_tol=0` to disable (with `cycle_spin=true`, random shifts inflate `rel_change`, potentially preventing early stopping). Default `NITERS=200`. The whole `pogm_restart` call is wrapped in `time()` to capture wall-clock runtime.
 11. Save output to `fn_recon` (the caller-specified full path). Persisted keys include the recon (`X`, `X_recon`, `omega`), per-iteration traces (`dc_costs`, `reg_costs`, `restarts`, `rel_changes`), parameters (`R`, `sigma1A`, `L`, `Nscales`, `patch_sizes`, `strides`, `lambdas`, `Niters`, `mom`, `conv_tol`, `cycle_spin`), and runtime metadata (`used_gpu`, `device`, `runtime_s`). See README.md for the full key reference.
@@ -79,9 +79,9 @@ The reconstruction uses `pogm_restart` from `src/mirt_mod.jl`. The momentum sche
 
 `pogm_restart` is a modified port of `MIRT.pogm_restart`. `MIRT.pogm_restart` cannot run on GPU because it allocates gradients with `zeros(size(x0))` (creates a CPU Float64 array), uses Float64 scalar literals that would promote `CuArray{ComplexF32}` to `ComplexF64`, and uses `real(-Fgrad .* ynew_yold)` which allocates large intermediate CuArrays. `mirt_mod.jl` fixes all three, and additionally adds early stopping via `conv_tol`. Progress display is driven by `@showprogress` inside `pogm_restart`. The `fun` callback is invoked with `(iter, xk, yk, is_restart, Fcostnew, rel_change)` — one more positional arg than upstream MIRT, where `rel_change` is the per-iteration `‖Δx‖/‖x‖` (NaN at iter 0). `reconstruct.jl`'s logger returns `(Fcostnew, last_reg[], is_restart, rel_change)`, which are collected into the `costs` array and unpacked into `dc_costs`, `reg_costs`, `restarts`, `rel_changes` for saving/plotting.
 
-### `scripts/report.jl` and `src/analysis.jl`
+### `scripts/report.jl` and `src/metrics.jl`
 
-`src/analysis.jl` provides reusable utilities (`tSNR`, `plotOpt`). `scripts/report.jl` defines `run_report(fn_recon; show_components=true)`, which loads a recon `.mat` and writes three artifacts to the same directory as the input `.mat`, with a filename prefix derived from its basename:
+`src/metrics.jl` provides reusable utilities (`tSNR`, `plotOpt`). `scripts/report.jl` defines `run_report(fn_recon; show_components=true)`, which loads a recon `.mat` and writes three artifacts to the same directory as the input `.mat`, with a filename prefix derived from its basename:
 - `<prefix>_report.png` — single 2×2 figure: convergence, relative iterate change (log-y, with `conv_tol` reference line), mean magnitude montage, tSNR montage.
 - `<prefix>_report.txt` — parameters + convergence + image-quality stats.
 - `<prefix>_scale<k>.png` — per-scale mean magnitude (omitted when `show_components=false` or `Nscales == 1`).
@@ -90,7 +90,7 @@ Older `.mat` files lacking the newer metadata keys (`rel_changes`, `runtime_s`, 
 
 ## Key implementation details
 
-**`σ₁(A) ≤ 1.0`** always (subsampling can only reduce the norm of the unsubsampled unitary operator). The unsubsampled operator is exactly unitary (σ₁ = 1), but subsampling with an incoherent mask reduces it slightly. Empirically, `σ₁(A) ≈ 0.968` for the 20260409tap dataset (measured via `tests/sigma1A_test.jl`). Hard-code `σ1A = 0.968294` after the first run to skip power iteration (~20 min). Using 1.0 is safe (overestimates L, so step size is conservative) but ~6.7% suboptimal.
+**`σ₁(A) ≤ 1.0`** always (subsampling can only reduce the norm of the unsubsampled unitary operator). The unsubsampled operator is exactly unitary (σ₁ = 1), but subsampling with an incoherent mask reduces it slightly. Empirically, `σ₁(A) ≈ 0.968` for the 20260409tap dataset (measured via `tests/sigma1A_tests.jl`). Hard-code `σ1A = 0.968294` after the first run to skip power iteration (~20 min). Using 1.0 is safe (overestimates L, so step size is conservative) but ~6.7% suboptimal.
 
 **Patch boundary handling**: `img2patches` uses `cld` (ceiling division) for step counts and clamps the last patch origin to `Nx - psx + 1`, so the image is always fully covered even when dimensions are not multiples of the stride.
 
@@ -128,3 +128,119 @@ The peak occurs during `Fcostnew = Fcost(ynew)` — 6 FPGM buffers are live (x0,
 **Sensitivity map format**: `run_recon` reads the key `"smaps"` (not `"smaps_raw"`) from `fn_smaps`. The file is a `.mat` written by BART after compression to `Nvc` virtual coils.
 
 **Experiment file structure**: All tunable parameters (`PATCH_SIZES`, `STRIDES`, `NITERS`, `σ1A`, `MOMENTUM`, `TOL`, `CYCLE_SPIN`) are declared as `const` at the top of each experiment file. Each experiment guards `run_recon` with a three-branch check: output missing → run; output exists and `params_match(fn_out; ...)` returns true → skip recon, regenerate report; output exists but params differ → `@warn` and skip (no overwrite). `params_match` is from `utils/recon_cache.jl`. To run with new parameters, shelve the old output to a subdirectory first. Multi-dataset files loop over a `datasets` array and print `"Reconstructing: $(ds.ksp)"` before each call for progress visibility.
+
+## Math correctness
+
+Review of the multi-scale low-rank (MSLR) fMRI reconstruction for mathematical
+correctness, cross-checked against Ong & Lustig (2016) and the authors' reference
+implementation (`frankong/multi_scale_low_rank`).
+
+**Bottom line: no mathematical errors were found in the core algorithm.** The
+reconstruction solves the intended composite problem correctly. Findings are minor —
+one log-base fidelity choice, one latent unused code path, and a missing (deliberately
+deferred) anti-blocking technique. This review documents what was verified and to what
+depth, so the claims are not over-broad.
+
+The problem solved is
+
+$$\min_{\mathbf X}\; \tfrac12\big\|\,\mathcal A\big(\textstyle\sum_k \mathbf X_k\big)-\mathbf y\,\big\|_2^2 \;+\; \sum_k \lambda_k\,\big\|\mathcal P_k(\mathbf X_k)\big\|_*$$
+
+with one image component $\mathbf X_k$ per spatial scale, data consistency on the sum, and
+a nuclear-norm penalty on the (voxels × time) patch matrices of each component.
+
+---
+
+### Verified correct — in depth
+
+- **Composite objective & separability of the prox.** The scales are independent
+  variables, so the proximal operator separates across scales. For **non-overlapping
+  patches that tile the volume** (the default `STRIDES = PATCH_SIZES`, when each patch size
+  divides its dimension — true for all provided experiments: 90/6, 60/6, full-volume, 1³) it
+  further separates across patches, so `g_prox` (per-scale, per-patch SVST with
+  overlap-averaging) is the **exact** proximal operator of the regularizer. With overlapping
+  patches — or a non-dividing patch size, since `img2patches` clamps the last patch origin and
+  thus overlaps at the boundary — it is the standard LLR overlap-averaging approximation.
+
+- **Gradient.** `dc_cost_grad(X) = repeat(A'(A·ΣₖXₖ − y))` is exactly $S'\mathcal A'(\mathcal A\,S\,\mathbf X-\mathbf y)$,
+  where $S:\mathbf X\mapsto\sum_k\mathbf X_k$ is the sum-over-scales operator and $S'$ its
+  adjoint (replicate to all scales). ✓
+
+- **Lipschitz constant.** $L = N_{\text{scales}}\,\sigma_1(\mathcal A)^2$ is the **tight**
+  bound. $\|\mathcal A S\| = \sqrt{N_{\text{scales}}}\,\sigma_1(\mathcal A)$ (Cauchy–Schwarz,
+  attained when all scale components equal A's top right singular vector), hence
+  $\|S'\mathcal A'\mathcal A S\| = N_{\text{scales}}\,\sigma_1(\mathcal A)^2$. The prox step
+  $\alpha = 1/L$ gives SVST threshold $\lambda_k/L$. ✓
+
+- **FISTA / FPGM momentum** (`mom=:fpgm`, default). The gradient is evaluated at the
+  momentum point, the prox produces the iterate, and the $t$-update and
+  $\beta=(t-1)/t^{+}$ are standard. Variable naming is transposed relative to the textbook
+  (here `x` is the momentum point and `y` the prox output) but the recursion is FISTA. The
+  first iteration has $\beta=0$, and the routine returns the prox output (a genuinely
+  low-rank iterate), not the extrapolated momentum point. ✓
+
+- **Gradient restart** (`:gr`, default). $\mathrm{Fgrad}=(1/\alpha)(x_{\text{old}}-y_{\text{new}})$
+  is the prox-gradient *mapping* (it accounts for both $f$ and $g$), so the gradient-restart
+  test is valid even though `Fcost` tracks only the smooth data term. ✓
+
+- **SVST** is singular-value soft-thresholding = the nuclear-norm proximal operator
+  (Cai–Candès–Shen). ✓
+
+- **Unit-patch `[1,1,1]` fast path** = block soft-threshold of each voxel's time series.
+  The SVD of a $1\times N_t$ row is $U=[1],\,S=[\|x\|],\,V^\mathsf{H}=x/\|x\|$, so SVST gives
+  $\max(1-\beta/\|x\|,0)\cdot x$ with nuclear norm $\|x\|_2$. The vectorized broadcast computes
+  exactly this (and avoids ~$N_{\text{vox}}$ serial GPU SVDs). It is joint/group sparsity across
+  time, not voxel-wise $\ell_1$. ✓
+
+- **GPU SENSE adjoint scaling.** Forward scale $1/\sqrt N$; adjoint scale $\sqrt N$ (since the
+  adjoint of the unnormalized `fft` is $N\cdot\text{ifft}$), with `fftshift`↔`ifftshift`
+  correctly swapped. Confirmed numerically by the `⟨Ax,y⟩ ≈ ⟨x,A'y⟩` test in
+  `tests/kernel_tests.jl`. ✓
+
+- **λ formula structure matches the reference.** The reference code computes
+  `√ms + √ns + √(log₂(bs·min(ms,ns)))` with `ms = p_k`, `ns = Nt`, `bs = N_vox/p_k`. Its log
+  argument `bs·min(ms,ns) = N_vox·Nt/max(p_k,Nt)` is **algebraically identical** to this code's
+  argument, because `min(a,b)/a = b/max(a,b)`. The `√p_k + √Nt` terms match exactly. ✓ (Only the
+  log *base* differs — see finding 1.)
+
+### Verified by spot-check (documented port, not re-derived term-by-term)
+
+- **POGM** (`mom=:pogm`) and **`poweriter`** are faithful GPU/memory-efficient ports of
+  `MIRT.pogm_restart` (Kim & Fessler 2018); the structure matches and the modifications are
+  documented in the module header. They were not independently re-derived line-by-line.
+
+---
+
+### Minor findings
+
+1. **Natural log vs base-2 (a documentation choice, not a bug).** Ong & Lustig's eq. (4) is
+   base-agnostic (stated up to a constant, "~"), so it does not specify a log base. The
+   authors' reference code uses `log2` (verified verbatim in `matlab/demo_dce_mri_decom.m`
+   and `matlab/demo_hanning_decom.m`). `reconstruct.jl` uses natural `log`, which shrinks the
+   third term by $\sqrt{\ln 2}\approx0.83$ (reference term ~1.20× larger) — a **~2–3% net
+   change in $\lambda_k$**, since $\sqrt{N_t}$ dominates the log term (and $\sqrt{p_k}$
+   dominates at the global scale). Natural log is consistent with the paper, and the empirical
+   `λ_GLOBAL` absorbs global rescaling. Switching to `log2` is an optional fidelity tweak only.
+
+2. **`restart=:fr` is latent-inconsistent.** Function restart compares `Fcost` (the smooth
+   data term passed by `reconstruct.jl`) and so would restart on the data term alone, not the
+   full $f+g$ objective. Harmless in practice: the default `:gr` is correct and `:fr` is never
+   selected. A clarifying comment was added at the restart block.
+
+3. **Random cycle spinning is implemented** (`cycle_spin=true` in `run_recon`; default `false`). See below.
+
+4. **`σ1A = 1.0` vs the measured 0.968** overestimates $L$ by ~6.7%, giving a
+   conservative (smaller) step. Safe and already documented. No change.
+
+---
+
+### Random cycle spinning
+
+Each `g_prox` call draws an independent random spatial shift $(Δx, Δy, Δz)$ from $[0,N_x-1]\times[0,N_y-1]\times[0,N_z-1]$, applies `circshift` before `patchSVST`, then exactly inverts with `circshift` using the negated shift. Over many iterations the shifts are i.i.d., so patch-boundary artifacts average out in expectation (Figueiredo & Nowak 2003, *IEEE TIP* 12(8):906–916; Coifman & Donoho 1995). Unit patches `[1,1,1]` are excluded — SVST is separable per voxel there, making shift/unshift a provable no-op.
+
+**Convergence caveat.** Cycle spinning makes the proximal map stochastic: the iterates converge to a noise ball around the minimizer of the shift-averaged objective, not a fixed point. Consequently `rel_change` has a positive noise floor and `conv_tol` early-stopping will likely never fire. Set `conv_tol=0` when using `cycle_spin=true`; `run_recon` issues a `@warn` if both are active simultaneously. Ong & Lustig / BART do run FISTA + cycle spinning successfully, so the cost trace should still descend — verify on an actual run.
+
+**Reproducibility.** `cycle_spin=true` is non-deterministic (Julia's default RNG is not seeded by `run_recon`). Same parameters now give different outputs each run. `params_match` still caches correctly — it checks parameter equality, not output equality.
+
+### Optional future tweak
+
+**`log` → `log2`** in the `λ_k` formula (`reconstruct.jl` §7) for bit-level fidelity to the reference implementation. Shifts $\lambda_k$ by ~2–3% and changes future recon outputs; existing saved `.mat` files are unaffected.

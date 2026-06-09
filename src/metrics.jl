@@ -1,10 +1,10 @@
-module Analysis
+module Metrics
 
 export tSNR, plotOpt
 
 #=
-analysis.jl
-Post-reconstruction analysis utilities.
+metrics.jl
+Post-reconstruction metrics utilities.
 
 Contents:
   - tSNR map computation
@@ -104,4 +104,4 @@ function plotOpt(
 end
 
 
-end # module Analysis
+end # module Metrics

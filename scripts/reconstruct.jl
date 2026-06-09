@@ -38,9 +38,9 @@ using Statistics, StatsBase
 using MAT, HDF5
 
 include(joinpath(@__DIR__, "..", "src", "recon.jl"))
-include(joinpath(@__DIR__, "..", "src", "analysis.jl"))
+include(joinpath(@__DIR__, "..", "src", "metrics.jl"))
 include(joinpath(@__DIR__, "..", "src", "mirt_mod.jl"))
-using .Recon, .Analysis, .MirtMod
+using .Recon, .Metrics, .MirtMod
 
 # Load GPU support if CUDA.jl is installed.
 # If CUDA is not installed, Asense_gpu will be unavailable

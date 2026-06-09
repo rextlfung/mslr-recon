@@ -24,8 +24,8 @@ using Plots
 using MIRTjim: jim
 using LaTeXStrings
 
-include(joinpath(@__DIR__, "..", "src", "analysis.jl"))
-using .Analysis
+include(joinpath(@__DIR__, "..", "src", "metrics.jl"))
+using .Metrics
 include(joinpath(@__DIR__, "..", "src", "activation.jl"))
 using .ActivationGLM
 

@@ -49,7 +49,7 @@ mslr-recon/
 │
 ├── src/
 │   ├── recon.jl              # Patch extraction/recombination, SVST, k-space utilities
-│   ├── analysis.jl           # tSNR maps, convergence plots
+│   ├── metrics.jl            # tSNR maps, convergence plots
 │   └── sense_gpu.jl          # GPU-native SENSE operator (requires CUDA.jl)
 │
 ├── scripts/
@@ -289,7 +289,7 @@ The length of the per-iteration traces is `Niters_run+1`, where `Niters_run ≤ 
 
 **λ is automatic.** The Ong & Lustig formula calibrates thresholds from patch geometry and Nt. It assumes the input k-space is prewhitened (σ_ksp ≈ 1) — BART's noise-prewhitening step satisfies this — so no manual tuning is needed.
 
-**Lipschitz constant.** `σ₁(A) ≤ 1.0` always — the unsubsampled operator is exactly unitary but subsampling reduces the spectral norm slightly (empirically `σ₁(A) ≈ 0.968` for the 20260409tap dataset). Set `σ1A = nothing` on the first run to measure it via power iteration (~20 min via `tests/sigma1A_test.jl`), then hard-code the result. Using `1.0` is safe (conservative step size) but ~6.7% suboptimal.
+**Lipschitz constant.** `σ₁(A) ≤ 1.0` always — the unsubsampled operator is exactly unitary but subsampling reduces the spectral norm slightly (empirically `σ₁(A) ≈ 0.968` for the 20260409tap dataset). Set `σ1A = nothing` on the first run to measure it via power iteration (~20 min via `tests/sigma1A_tests.jl`), then hard-code the result. Using `1.0` is safe (conservative step size) but ~6.7% suboptimal.
 
 **Memory.** If VRAM is tight, reduce `Nscales` (each scale adds `N_opt × Nx·Ny·Nz·Nt × 8 B` to the optimizer buffer, where `N_opt` is 6 for `:fpgm`, 9 for `:pogm`) or reduce `Nvc` at the BART sensitivity-map compression step. The k-space term `3 × |ksp|` is fixed regardless of `Nscales` or `mom`. Switch to `use_gpu = false` to use RAM instead of VRAM; set `-t auto` to use all CPU threads for the patch SVDs.
 

@@ -1,5 +1,5 @@
 #=
-sigma1A_test.jl
+sigma1A_tests.jl
 Verify that σ₁(A) ≤ 1 for the SENSE operator built from this dataset.
 
 Builds A for a single time frame (same as run_recon but for one frame only),
@@ -7,7 +7,7 @@ then runs power iteration.  Single-frame is sufficient because the full
 block-diagonal A has σ₁ = max_t σ₁(A_t), and each frame uses the same smaps.
 
 Usage:
-    julia tests/sigma1A_test.jl
+    julia tests/sigma1A_tests.jl
 =#
 
 using Pkg
