@@ -32,6 +32,7 @@ Based on main9993.jl
 module Reconstruct
 
 using LinearAlgebra
+using Base.Threads
 using LinearMapsAA: block_diag, undim
 using MIRT: Asense
 using Statistics, StatsBase
@@ -83,6 +84,9 @@ function run_recon(;
         cpu_model = strip(Sys.cpu_info()[1].model)
         device_str = "$cpu_model ($(Threads.nthreads()) threads)"
         println("CPU reconstruction  (device: ", device_str, ")")
+        # Prevent OpenBLAS from spawning its own threads inside each @threads worker.
+        # Without this, @threads over patches/frames × BLAS internal threads = oversubscription.
+        BLAS.set_num_threads(1)
     end
 
     Nscales = length(PATCH_SIZES)
@@ -139,7 +143,10 @@ function run_recon(;
         # CPU SENSE operator from MIRT
         Aframe = (Ω_t, S) -> Asense(Ω_t, S; fft_forward=true, unitary=true)
     end
-    A = block_diag([Aframe(s, smaps) for s in eachslice(Ω; dims=ndims(Ω))]...)
+    # Build per-frame operators first. On CPU, Aframes is also used for threaded
+    # dc_cost / dc_cost_grad (one operator per Julia thread, no shared mutable state).
+    Aframes = [Aframe(Ω[:,:,:,it], smaps) for it in 1:Nt]
+    A = block_diag(Aframes...)
 
     # Flatten k-space to (Nsamples, Nvc, Nt) — discard unsampled zeros.
     # Ω_idx is GPU-resident when use_gpu=true, avoiding scalar indexing on CuArrays.
@@ -192,12 +199,37 @@ function run_recon(;
     # ── 8. Cost functions and proximal operator ───────────────────────────────
     image_sum(X) = dropdims(sum(X; dims=5); dims=5)
 
+    # On CPU, apply each frame's SENSE operator concurrently. Each Aframes[it] closure
+    # owns its own work1/work2 buffers (allocated at Asense construction), so concurrent
+    # calls on distinct frame operators are safe. BLAS.set_num_threads(1) above prevents
+    # nested parallelism (Julia threads × BLAS internal threads).
+    # On GPU the block_diag path is unchanged — CuArrays can't use @threads.
     function dc_cost(X)
-        return 0.5 * norm(A * image_sum(X) - ksp)^2
+        if use_gpu
+            return 0.5 * norm(A * image_sum(X) - ksp)^2
+        end
+        img = image_sum(X)
+        res = similar(ksp)
+        @threads for it in 1:Nt
+            res[:, :, it] .= Aframes[it] * view(img, :,:,:,it) .- ksp[:,:,it]
+        end
+        return 0.5 * norm(res)^2
     end
 
     function dc_cost_grad(X)
-        g = A' * (A * image_sum(X) - ksp)
+        if use_gpu
+            g = A' * (A * image_sum(X) - ksp)
+            return repeat(g; outer=[1, 1, 1, 1, Nscales])
+        end
+        img = image_sum(X)
+        res = similar(ksp)
+        @threads for it in 1:Nt
+            res[:, :, it] .= Aframes[it] * view(img, :,:,:,it) .- ksp[:,:,it]
+        end
+        g = similar(img)
+        @threads for it in 1:Nt
+            g[:,:,:,it] .= Aframes[it]' * view(res, :,:,it)
+        end
         return repeat(g; outer=[1, 1, 1, 1, Nscales])
     end
 

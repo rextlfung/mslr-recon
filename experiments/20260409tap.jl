@@ -31,7 +31,7 @@ const STRIDES           = [cld.(ps, 2) for ps in PATCH_SIZES] # half-overlapping
 const NSCALES           = length(PATCH_SIZES) # number of scales
 const CYCLE_SPIN        = true # random cycle spin for shift-invariant regularization
 const σ1A               = 1.0 # upper-bound from unitary FFTs and normalized smaps
-const λ_GLOBAL          = 10.0 # global tuner for regularization weights
+const λ_GLOBAL          = 6.0 # global tuner for regularization weights
 const NITERS            = 100 # number of iterations
 const TOL               = 1e-3 # early stop tolerance for ||x_k - x_(k-1)||/||x_(k-1)||
 const USE_GPU           = false # GPU acceleration
@@ -52,7 +52,7 @@ const PARADIGM = (
 datasets = [
     (ksp = "pd_epi_zf.mat",       base = "mslr/pd_recon"),
     (ksp = "caipi_epi_zf.mat",    base = "mslr/caipi_recon"),
-    (ksp = "caipi_ts_epi_zf.mat", base = "mslr/caipi_ts_recon"),
+    # (ksp = "caipi_ts_epi_zf.mat", base = "mslr/caipi_ts_recon"),
 ]
 
 for ds in datasets

@@ -74,6 +74,19 @@ check("CPU round-trip (non-overlapping patches)", relerr(img_rt, img_cpu), 1f-5)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 1b. patches2img overlapping: Array serial fallback matches AbstractArray path.
+#     Verifies patches2img(P::Array) routes overlapping strides to the serial accumulate path.
+#     Force AbstractArray dispatch via view() — SubArray <: AbstractArray, not Array.
+# ══════════════════════════════════════════════════════════════════════════════
+println("\n=== 1b. patches2img overlapping: Array dispatch vs AbstractArray dispatch ===")
+ps1b, ss1b = [4, 4, 2], [2, 2, 1]   # half-overlapping strides → nonoverlap=false
+P1b        = img2patches(img_cpu, ps1b, ss1b)
+img_rt_arr = patches2img(P1b,                  ps1b, ss1b, (Nx, Ny, Nz))  # Array dispatch
+img_rt_abs = patches2img(view(P1b, :, :, :),   ps1b, ss1b, (Nx, Ny, Nz))  # AbstractArray dispatch
+check("patches2img overlapping  Array vs AbstractArray", relerr(img_rt_arr, img_rt_abs), 1f-6)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 2. img2patches / patches2img: CPU Array vs GPU CuArray
 # ══════════════════════════════════════════════════════════════════════════════
 println("\n=== 2. img2patches / patches2img CPU vs GPU ===")
@@ -192,6 +205,45 @@ if HAS_GPU
     adj_err_g = abs(lhs_g - rhs_g) / (abs(lhs_g) + eps(Float32))
     check("Asense adjoint consistency (GPU)", adj_err_g, 1f-4)
 end
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 8. dc_cost_grad threaded vs block_diag reference.
+#    Verifies that the @threads-over-frames implementation produces the same
+#    gradient as the original A' * (A * img - ksp) path.
+# ══════════════════════════════════════════════════════════════════════════════
+println("\n=== 8. dc_cost_grad threaded vs block_diag reference ===")
+using LinearMapsAA: block_diag
+using Base.Threads
+
+Random.seed!(17)
+Nt_t  = 5
+samp_t = zeros(Bool, Nx, Ny, Nz)
+samp_t[1:2:end, :, :] .= true
+K_t   = sum(samp_t)
+Aframes_t = [Asense(samp_t, smaps_cpu; fft_forward=true, unitary=true) for _ in 1:Nt_t]
+# block_diag with same idim/odim → LinearMapAO with idim=(Nx,Ny,Nz,Nt_t), odim=(K_t,Nc,Nt_t)
+A_t = block_diag(Aframes_t...)
+
+img_t = randn(ComplexF32, Nx, Ny, Nz, Nt_t)
+ksp_t = randn(ComplexF32, K_t, Nc, Nt_t)
+
+# Reference: block_diag path (single-threaded sequential)
+res_ref = A_t * img_t .- ksp_t   # (K_t, Nc, Nt_t)
+g_ref   = A_t' * res_ref         # (Nx, Ny, Nz, Nt_t)
+
+# Threaded path (replaces block_diag in dc_cost / dc_cost_grad on CPU)
+res_thr = similar(ksp_t)
+@threads for it in 1:Nt_t
+    res_thr[:, :, it] .= Aframes_t[it] * view(img_t, :,:,:,it) .- ksp_t[:,:,it]
+end
+g_thr = similar(img_t)
+@threads for it in 1:Nt_t
+    g_thr[:,:,:,it] .= Aframes_t[it]' * view(res_thr, :,:,it)
+end
+
+check("dc_cost_grad threaded residual vs block_diag", relerr(res_thr, res_ref), 1f-5)
+check("dc_cost_grad threaded gradient vs block_diag", relerr(g_thr,   g_ref),   1f-5)
 
 
 # ── Summary ───────────────────────────────────────────────────────────────────

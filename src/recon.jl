@@ -70,6 +70,38 @@ function img2patches(img::AbstractArray{<:Any,4}, patch_size, stride_size)
     return P
 end
 
+# CPU: @threads over patches — each ip writes to a disjoint P[:,:,ip] slice, no races.
+function img2patches(img::Array{<:Any,4}, patch_size, stride_size)
+    Nx, Ny, Nz, Nt = size(img)
+    psx, psy, psz   = patch_size
+    ssx, ssy, ssz   = stride_size
+
+    all(>(0), stride_size) || throw(ArgumentError("stride_size elements must be positive, got $stride_size"))
+    psx = min(psx, Nx); psy = min(psy, Ny); psz = min(psz, Nz)
+
+    Nsteps_x = cld(Nx - psx, ssx)
+    Nsteps_y = cld(Ny - psy, ssy)
+    Nsteps_z = cld(Nz - psz, ssz)
+    Np = (Nsteps_x + 1) * (Nsteps_y + 1) * (Nsteps_z + 1)
+    P = fill!(similar(img, ComplexF32, psx * psy * psz, Nt, Np), zero(ComplexF32))
+
+    # Decode flat patch index back to (ix, iy, iz) without a pre-allocated origins array.
+    # The original nested loop increments ip in column-major order: ix fastest, iz slowest.
+    stride_xy = Nsteps_x + 1
+    stride_z  = stride_xy * (Nsteps_y + 1)
+    @threads for ip in 1:Np
+        ip0 = ip - 1
+        ix  = ip0 % stride_xy
+        iy  = (ip0 ÷ stride_xy) % (Nsteps_y + 1)
+        iz  = ip0 ÷ stride_z
+        sx  = min(ix*ssx + 1, Nx - psx + 1)
+        sy  = min(iy*ssy + 1, Ny - psy + 1)
+        sz  = min(iz*ssz + 1, Nz - psz + 1)
+        P[:, :, ip] .= reshape(view(img, sx:sx+psx-1, sy:sy+psy-1, sz:sz+psz-1, :), psx*psy*psz, Nt)
+    end
+    return P
+end
+
 
 """
     patches2img(P, patch_size, stride_size, og_size) -> img
@@ -116,6 +148,62 @@ function patches2img(P::AbstractArray, patch_size, stride_size, og_size::NTuple{
     # Replace zeros with 1 to avoid divide-by-zero (max is GPU-friendly)
     Pcount .= max.(Pcount, 1f0)
     img ./= Pcount    # broadcasts (Nx,Ny,Nz) over (Nx,Ny,Nz,Nt)
+    return img
+end
+
+# CPU: @threads over patches when patches tile the image without overlap.
+# Non-overlap condition: stride ≥ patch_size in every dim AND (dim - patch_size) is
+# exactly divisible by stride (no boundary clamping causes two patches to share a voxel).
+# When that holds, each ip writes to a disjoint region → no races, no overlap-averaging needed.
+# Falls back to the serial AbstractArray path otherwise (overlapping / half-stride case).
+function patches2img(P::Array, patch_size, stride_size, og_size::NTuple{3};
+                     pcount=nothing)
+    _, Nt, _ = size(P)
+    psx, psy, psz = patch_size
+    ssx, ssy, ssz = stride_size
+    Nx, Ny, Nz    = og_size
+
+    psx = min(psx, Nx); psy = min(psy, Ny); psz = min(psz, Nz)
+
+    Nsteps_x = cld(Nx - psx, ssx)
+    Nsteps_y = cld(Ny - psy, ssy)
+    Nsteps_z = cld(Nz - psz, ssz)
+
+    img = fill!(similar(P, ComplexF32, Nx, Ny, Nz, Nt), zero(ComplexF32))
+
+    nonoverlap = ssx >= psx && ssy >= psy && ssz >= psz &&
+                 (Nx - psx) % ssx == 0 && (Ny - psy) % ssy == 0 && (Nz - psz) % ssz == 0
+
+    if nonoverlap
+        Np        = (Nsteps_x + 1) * (Nsteps_y + 1) * (Nsteps_z + 1)
+        stride_xy = Nsteps_x + 1
+        stride_z  = stride_xy * (Nsteps_y + 1)
+        @threads for ip in 1:Np
+            ip0 = ip - 1
+            ix  = ip0 % stride_xy
+            iy  = (ip0 ÷ stride_xy) % (Nsteps_y + 1)
+            iz  = ip0 ÷ stride_z
+            sx  = min(ix*ssx + 1, Nx - psx + 1)
+            sy  = min(iy*ssy + 1, Ny - psy + 1)
+            sz  = min(iz*ssz + 1, Nz - psz + 1)
+            img[sx:sx+psx-1, sy:sy+psy-1, sz:sz+psz-1, :] .= reshape(view(P, :, :, ip), psx, psy, psz, Nt)
+        end
+    else
+        Pcount = pcount !== nothing ?
+            fill!(pcount, zero(Float32)) :
+            fill!(similar(P, Float32, Nx, Ny, Nz), zero(Float32))
+        ip = 1
+        for iz in 0:Nsteps_z, iy in 0:Nsteps_y, ix in 0:Nsteps_x
+            sx = min(ix*ssx + 1, Nx - psx + 1)
+            sy = min(iy*ssy + 1, Ny - psy + 1)
+            sz = min(iz*ssz + 1, Nz - psz + 1)
+            img[sx:sx+psx-1, sy:sy+psy-1, sz:sz+psz-1, :] .+= reshape(view(P, :, :, ip), psx, psy, psz, Nt)
+            Pcount[sx:sx+psx-1, sy:sy+psy-1, sz:sz+psz-1] .+= 1f0
+            ip += 1
+        end
+        Pcount .= max.(Pcount, 1f0)
+        img ./= Pcount
+    end
     return img
 end
 
