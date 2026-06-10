@@ -26,8 +26,6 @@ using LaTeXStrings
 
 include(joinpath(@__DIR__, "..", "src", "metrics.jl"))
 using .Metrics
-include(joinpath(@__DIR__, "..", "src", "activation.jl"))
-using .ActivationGLM
 
 _fmt_vec(v) = "[" * join(Int.(v), ", ") * "]"
 
@@ -37,7 +35,7 @@ function _format_summary(; fn_recon, Nx, Ny, Nz, Nt, R, σ1A, L_val,
         used_gpu, device, runtime_s, mom_str, conv_tol, cycle_spin,
         dc_final, reg_final, rel_change_final,
         img_min, img_max, img_mean, img_std,
-        mean_tsnr, peak_tsnr, act=nothing)
+        mean_tsnr, peak_tsnr)
     device_label = if device !== nothing
         device
     elseif used_gpu === nothing
@@ -89,20 +87,11 @@ function _format_summary(; fn_recon, Nx, Ny, Nz, Nt, R, σ1A, L_val,
     @printf(io, "  |X_recon|:    min = %.3g, mean = %.3g, max = %.3g, std = %.3g\n",
             img_min, img_mean, img_max, img_std)
     @printf(io, "  tSNR:         mean = %.2f, peak = %.2f\n", mean_tsnr, peak_tsnr)
-    if act !== nothing
-        println(io)
-        println(io, "── Activation (tap > rest, barebones GLM) ─────────────")
-        @printf(io, "  Peak t:       %.2f  (peak |t| = %.2f)\n", act.peak_t, act.peak_abs)
-        @printf(io, "  Voxels t>%.1f: %d  (%.2f%% of %d brain voxels)\n",
-                act.t_thresh, act.n_supra, act.pct_supra, act.nvox)
-        @printf(io, "  Mean top-1%% t: %.2f\n", act.mean_top1)
-        println(io, "  (quick-look metric; use fmri-analysis for BET mask + FDR)")
-    end
     return String(take!(io))
 end
 
 
-function run_report(fn_recon; show_components=true, paradigm=nothing, t_thresh=5.0)
+function run_report(fn_recon; show_components=true)
     isfile(fn_recon) || error("File not found: $fn_recon")
 
     prefix = joinpath(dirname(fn_recon), splitext(basename(fn_recon))[1])
@@ -159,15 +148,6 @@ function run_report(fn_recon; show_components=true, paradigm=nothing, t_thresh=5
         isempty(finite_rc) ? nothing : last(finite_rc)
     end
 
-    # ── Task activation (optional; only when a paradigm is supplied) ───────────
-    t_vol = nothing
-    act   = nothing
-    if paradigm !== nothing
-        println("Computing task-activation t-map (tap > rest) …")
-        t_vol, brain_mask, _ = activation_tmap(X_recon, paradigm)
-        act = activation_summary(t_vol, brain_mask; t_thresh)
-    end
-
     # ── Text summary ──────────────────────────────────────────────────────────
     summary = _format_summary(;
         fn_recon, Nx, Ny, Nz, Nt, R, σ1A, L_val,
@@ -177,7 +157,7 @@ function run_report(fn_recon; show_components=true, paradigm=nothing, t_thresh=5
         dc_final = dc_costs[end], reg_final = reg_costs[end],
         rel_change_final,
         img_min, img_max, img_mean, img_std,
-        mean_tsnr, peak_tsnr, act,
+        mean_tsnr, peak_tsnr,
     )
     print(summary)
     write("$(prefix)_report.txt", summary)

@@ -31,35 +31,31 @@ const STRIDES           = [cld.(ps, 2) for ps in PATCH_SIZES] # half-overlapping
 const NSCALES           = length(PATCH_SIZES) # number of scales
 const CYCLE_SPIN        = true # random cycle spin for shift-invariant regularization
 const σ1A               = 1.0 # upper-bound from unitary FFTs and normalized smaps
-const λ_GLOBAL          = 6.0 # global tuner for regularization weights
 const NITERS            = 100 # number of iterations
 const TOL               = 1e-3 # early stop tolerance for ||x_k - x_(k-1)||/||x_(k-1)||
 const USE_GPU           = false # GPU acceleration
 const MOMENTUM          = :pogm # momentum
 
-# Task paradigm for the optional barebones activation report (tap > rest).
-# Acquisition metadata, kept here so the recon repo has no dependency on the
-# separate fmri-analysis repo. Mirrors ../fmri-analysis/experiments/20260409tap.jl.
-# Set to `nothing` to skip activation and emit the plain 2×2 report.
-const PARADIGM = (
-    tr        = 0.8f0,
-    onsets    = [collect(0.0f0:40.0f0:320.0f0), collect(20.0f0:40.0f0:320.0f0)],
-    durations = [fill(20.0f0, 9), fill(20.0f0, 9)],
-    contrast  = [1.0f0, -1.0f0, 0.0f0],   # tap, rest, intercept
-    n_discard = 0,                        # these recons are pre-trimmed (Nt=375)
-)
-
-datasets = [
-    (ksp = "pd_epi_zf.mat",       base = "mslr/pd_recon"),
-    (ksp = "caipi_epi_zf.mat",    base = "mslr/caipi_recon"),
-    # (ksp = "caipi_ts_epi_zf.mat", base = "mslr/caipi_ts_recon"),
+# Lambda sweep — each entry is (λ_GLOBAL, output subfolder name within mslr/).
+# Folders must exist under RECON_DIR/mslr/ before running.
+const LAMBDA_SWEEP = [
+    (6.0, "G+L+L_6xlambda"),
+    (7.0, "G+L+L_7xlambda"),
+    (8.0, "G+L+L_8xlambda"),
+    (9.0, "G+L+L_9xlambda"),
 ]
 
-for ds in datasets
-    fn_out = joinpath(RECON_DIR, "$(ds.base).mat")
+datasets = [
+    (ksp = "pd_epi_zf.mat",       name = "pd_recon"),
+    (ksp = "caipi_epi_zf.mat",    name = "caipi_recon"),
+    # (ksp = "caipi_ts_epi_zf.mat", name = "caipi_ts_recon"),
+]
+
+for (λ_GLOBAL, subdir) in LAMBDA_SWEEP, ds in datasets
+    fn_out = joinpath(RECON_DIR, "mslr", subdir, "$(ds.name).mat")
     try
         if !isfile(fn_out)
-            println("Reconstructing: $(ds.ksp)")
+            println("Reconstructing: $(ds.ksp)  [λ=$λ_GLOBAL → $subdir]")
             fn_out = run_recon(
                 fn_ksp          = joinpath(RECON_DIR, ds.ksp),
                 fn_smaps        = FN_SMAPS,
@@ -74,7 +70,7 @@ for ds in datasets
                 cycle_spin      = CYCLE_SPIN,
                 use_gpu         = USE_GPU,
             )
-            run_report(fn_out; paradigm = PARADIGM)
+            run_report(fn_out)
         elseif params_match(fn_out;
                 NITERS          = NITERS,
                 PATCH_SIZES     = PATCH_SIZES,
@@ -84,11 +80,12 @@ for ds in datasets
                 conv_tol        = TOL,
                 lambda_global   = λ_GLOBAL,
                 cycle_spin      = CYCLE_SPIN)
-            run_report(fn_out; paradigm = PARADIGM)
+            println("Already done: $subdir/$(ds.name) — regenerating report")
+            run_report(fn_out)
         else
             @warn "Skipping $(ds.ksp): $(fn_out) exists with different parameters — shelve it first."
         end
     catch e
-        @error "Failed on $(ds.ksp)" exception=(e, catch_backtrace())
+        @error "Failed on $(ds.ksp) [λ=$λ_GLOBAL]" exception=(e, catch_backtrace())
     end
 end
