@@ -224,7 +224,9 @@ function patch_nucnorm(P::Array)
     Np = size(P, 3)
     costs = zeros(real(eltype(P)), Np)
     @threads for ip in 1:Np
-        costs[ip] = sum(svdvals(view(P, :, :, ip)))
+        patch = view(P, :, :, ip)
+        iszero(patch) && continue
+        costs[ip] = sum(svdvals(patch))
     end
     return sum(costs)
 end
