@@ -49,7 +49,9 @@ mslr-recon/
 │
 ├── src/
 │   ├── recon.jl              # Patch extraction/recombination, SVST, k-space utilities
+│   ├── mirt_mod.jl           # GPU-compatible pogm_restart + poweriter (modified MIRT port)
 │   ├── metrics.jl            # tSNR maps, convergence plots
+│   ├── activation.jl         # Barebones GLM t-map for ranking recons (standalone module)
 │   └── sense_gpu.jl          # GPU-native SENSE operator (requires CUDA.jl)
 │
 ├── scripts/
@@ -59,11 +61,15 @@ mslr-recon/
 ├── utils/
 │   └── recon_cache.jl        # `params_match`: skips recomputation when saved params match
 │
+├── tests/
+│   ├── kernel_tests.jl       # SENSE operator adjoint consistency (⟨Ax,y⟩ ≈ ⟨x,A'y⟩)
+│   └── sigma1A_tests.jl      # Measure σ₁(A) via power iteration
+│
 └── experiments/
-    ├── 20241017tap.jl        # Finger-tapping, 10 coils, Nt=300
-    ├── 20251106balltap.jl    # Ball phantom + finger-tapping, 18 coils, Nt=300
-    ├── 20260317tap.jl        # Finger-tapping, 18 coils, Nt=387, half-overlapping patches
-    └── 20260409tap.jl        # Finger-tapping, 21 coils, Nt=387, 3-scale; loops over 3 datasets (caipi, caipi_ts, pd)
+    ├── 20241017tap.jl        # Finger-tapping, 10 coils, Nt=300, 3-scale non-overlapping
+    ├── 20251106balltap.jl    # Ball phantom + finger-tapping, 18 coils, Nt=300, 3-scale non-overlapping
+    ├── 20260317tap.jl        # Finger-tapping, 18 coils, Nt=387, 1-scale half-overlapping; λ sweep over 2 datasets
+    └── 20260409tap.jl        # Finger-tapping, 21 coils, Nt=375, 1-scale half-overlapping; λ sweep over 2 datasets
 ```
 
 ---
@@ -121,28 +127,32 @@ Three artifacts are written to the same directory as the input `.mat`, with a fi
 - `<prefix>_report.txt` — short text summary: parameters used, convergence stats (iterations reached, restarts, final costs, final `‖Δx‖/‖x‖`), and image-quality stats (intensity range + tSNR).
 - `<prefix>_scale<k>.png` — per-scale mean magnitude (one per scale when `Nscales > 1`).
 
-#### Optional: task-activation summary
+#### Task-activation GLM (`src/activation.jl`)
 
 For task fMRI, tSNR is a misleading quality metric — over-regularization shrinks
 temporal variance, *inflating* tSNR while suppressing the BOLD signal. Activation
 is the principled arbiter: static structural aliasing is temporally constant, so
 it projects onto the intercept regressor and **cannot inflate the task
-t-statistic**, whereas it directly inflates tSNR via the temporal mean. A
-barebones activation GLM (`src/activation.jl`) gives this metric. Pass a
-`paradigm` to `run_report`:
+t-statistic**, whereas it directly inflates tSNR via the temporal mean.
+
+`src/activation.jl` provides a standalone `ActivationGLM` module with a barebones
+GLM t-map for ranking reconstructions. It is **not** wired into `run_report` — use
+it directly from the REPL or an analysis script:
 
 ```julia
-run_report(fn_recon; paradigm = (
+include("src/activation.jl")
+using .ActivationGLM
+
+paradigm = (
     tr        = 0.8f0,
     onsets    = [collect(0f0:40f0:320f0), collect(20f0:40f0:320f0)],  # tap, rest (s)
     durations = [fill(20f0, 9), fill(20f0, 9)],
     contrast  = [1f0, -1f0, 0f0],                                     # tap > rest
-    n_discard = 0))
-```
+    n_discard = 0)
 
-When supplied, the report gains an `── Activation ──` text block (peak *t*, voxels
-above `t_thresh`, mean top-1% *t*) and the figure expands to 2×3 with a t-map and a
-suprathreshold-activation panel. Default `paradigm = nothing` keeps the plain 2×2 report.
+t_vol, brain_mask, df = activation_tmap(X_recon, paradigm)
+stats = activation_summary(t_vol, brain_mask)
+```
 
 This cleanly arbitrates **recon parameters at a fixed sampling pattern**.
 Comparing *across* sampling schemes (e.g. static-mask CAIPI vs time-varying) is
@@ -178,9 +188,11 @@ run_recon(
     σ1A = 1.0,                           # set to `nothing` to compute via power iteration
     use_gpu         = true,              # false for CPU
     mom             = :fpgm,            # :fpgm (default), :pogm, or :pgm
-    # NITERS and conv_tol have defaults (200 and 1e-5); override if needed:
+    # NITERS, conv_tol, λ_GLOBAL, cycle_spin have defaults; override if needed:
     # NITERS          = 200,
     # conv_tol        = 1e-5,
+    # λ_GLOBAL        = 1.0,            # global scaling factor for all λ_k
+    # cycle_spin      = false,           # random spatial shifts for shift-invariant regularization
 )
 ```
 
@@ -281,7 +293,10 @@ The length of the per-iteration traces is `Niters_run+1`, where `Niters_run ≤ 
 | `device` | string | GPU name, or `<CPU model> (<n> threads)` |
 | `mom` | string | Momentum scheme (`fpgm` / `pogm` / `pgm`) |
 | `conv_tol` | scalar | Early-stopping tolerance |
+| `lambda_global` | scalar | Global λ scaling factor (`λ_GLOBAL`) |
+| `cycle_spin` | Bool | Whether random cycle spinning was enabled |
 | `runtime_s` | scalar | Wall-clock seconds for the optimizer |
+| `iter_time_s` | scalar | Average wall-clock seconds per iteration |
 
 ---
 
@@ -293,7 +308,7 @@ The length of the per-iteration traces is `Niters_run+1`, where `Niters_run ≤ 
 
 **Memory.** If VRAM is tight, reduce `Nscales` (each scale adds `N_opt × Nx·Ny·Nz·Nt × 8 B` to the optimizer buffer, where `N_opt` is 6 for `:fpgm`, 9 for `:pogm`) or reduce `Nvc` at the BART sensitivity-map compression step. The k-space term `3 × |ksp|` is fixed regardless of `Nscales` or `mom`. Switch to `use_gpu = false` to use RAM instead of VRAM; set `-t auto` to use all CPU threads for the patch SVDs.
 
-**Convergence.** Early stopping fires when the relative image-iterate change `‖x_new − x_prev‖_F / ‖x_prev‖_F` falls below `conv_tol` (default `1e-5`). The check is gated by a `conv_min_iter`-iteration warmup (default 10) that resets after each gradient restart — a restart resets momentum so the next step's rel_change is momentum-free and systematically smaller than the values used to calibrate `conv_tol`, making an immediate check unreliable. The iterate compared is the prox-step output (before momentum extrapolation). The default `NITERS=200` acts as a hard cap. Set `conv_tol=0` to always run all iterations. For fMRI, underfitting (stopping too early) is the main risk — aliasing artifacts left by an underconverged reconstruction appear as spurious spatial structure that tSNR cannot detect, since temporally static artifacts do not inflate temporal variance.
+**Convergence.** Early stopping fires when the relative image-iterate change `‖x_new − x_prev‖_F / ‖x_prev‖_F` falls below `conv_tol` (default `1e-5`). The check is gated by a `conv_min_iter`-iteration grace period (default 10) after each gradient restart — a restart resets momentum so the next step's rel_change is momentum-free and systematically smaller than the values used to calibrate `conv_tol`, making an immediate check unreliable. The grace period decays by 1 each time a restart fires (floored at 1), so a chain of restarts near convergence does not permanently block early stopping. The iterate compared is the prox-step output (before momentum extrapolation). The default `NITERS=200` acts as a hard cap. Set `conv_tol=0` to always run all iterations. For fMRI, underfitting (stopping too early) is the main risk — aliasing artifacts left by an underconverged reconstruction appear as spurious spatial structure that tSNR cannot detect, since temporally static artifacts do not inflate temporal variance.
 
 **REPL workflow.** Experiment files use `Revise.includet` so you can re-run them in the same REPL session without restarting Julia. Revise also automatically picks up edits to `src/` files while the REPL is open.
 
