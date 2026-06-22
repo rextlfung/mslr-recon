@@ -26,23 +26,20 @@ using .ReconCache
 
 const RECON_DIR  = "/StorageRAID/rexfung/20260409tap/recon"
 const FN_SMAPS   = joinpath(RECON_DIR, "smaps_bart.mat")
-const PATCH_SIZES       = [[90,90,60],[20,20,20],[6,6,6]] # global + local + local
+const PATCH_SIZES       = [[6,6,6]] # global + local
 const STRIDES           = [cld.(ps, 2) for ps in PATCH_SIZES] # half-overlapping patches
 const NSCALES           = length(PATCH_SIZES) # number of scales
 const CYCLE_SPIN        = true # random cycle spin for shift-invariant regularization
 const σ1A               = 1.0 # upper-bound from unitary FFTs and normalized smaps
 const NITERS            = 100 # number of iterations
-const TOL               = 1e-3 # early stop tolerance for ||x_k - x_(k-1)||/||x_(k-1)||
-const USE_GPU           = false # GPU acceleration
-const MOMENTUM          = :pogm # momentum
+const TOL               = 1e-2 # early stop tolerance for ||x_k - x_(k-1)||/||x_(k-1)||
+const USE_GPU           = true # GPU acceleration
+const MOMENTUM          = :fpgm # momentum
 
 # Lambda sweep — each entry is (λ_GLOBAL, output subfolder name within mslr/).
 # Folders must exist under RECON_DIR/mslr/ before running.
 const LAMBDA_SWEEP = [
-    (6.0, "G+L+L_6xlambda"),
-    (7.0, "G+L+L_7xlambda"),
-    (8.0, "G+L+L_8xlambda"),
-    (9.0, "G+L+L_9xlambda"),
+    (6.0, "L_6xlambda"),
 ]
 
 datasets = [
