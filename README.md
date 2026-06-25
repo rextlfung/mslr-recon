@@ -67,7 +67,7 @@ mslr-recon/
 │
 └── experiments/
     ├── 20241017tap.jl        # Finger-tapping, 10 coils, Nt=300, 3-scale non-overlapping
-    ├── 20251106balltap.jl    # Ball phantom + finger-tapping, 18 coils, Nt=300, 3-scale non-overlapping
+    ├── 20251106tap.jl        # Finger-tapping, 18 coils, 1-scale half-overlapping; λ sweep over 1 dataset
     ├── 20260317tap.jl        # Finger-tapping, 18 coils, Nt=387, 1-scale half-overlapping; λ sweep over 2 datasets
     └── 20260409tap.jl        # Finger-tapping, 21 coils, Nt=375, 1-scale half-overlapping; λ sweep over 2 datasets
 ```
@@ -95,7 +95,7 @@ julia --project=. -e 'using Pkg; Pkg.instantiate()'
 Copy an existing experiment file, update the paths and scan parameters, and run:
 
 ```bash
-cp experiments/20251106balltap.jl experiments/my_experiment.jl
+cp experiments/20260409tap.jl experiments/my_experiment.jl
 # edit my_experiment.jl — set paths and use_gpu
 ```
 
