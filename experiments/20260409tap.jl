@@ -2,7 +2,7 @@
 20260409tap.jl
 Experiment configuration for the 2026-04-08 finger-tapping dataset.
 2.4 mm isotropic, 21 virtual coils, Nt=375 frames.
-Multi-scale LR decomposition: global + local + sparse scales, half-overlapping patches.
+Single-scale LR decomposition (6x6x6 patches), half-overlapping patches.
 Runs all 3 acquired datasets sequentially (caipi, caipi_ts, pd).
 
 Set use_gpu = true / false below, then run:
@@ -26,11 +26,11 @@ using .ReconCache
 
 const RECON_DIR  = "/StorageRAID/rexfung/20260409tap/recon"
 const FN_SMAPS   = joinpath(RECON_DIR, "smaps_bart.mat")
-const PATCH_SIZES       = [[6,6,6]] # global + local
+const PATCH_SIZES       = [[6,6,6]] # single scale
 const STRIDES           = [cld.(ps, 2) for ps in PATCH_SIZES] # half-overlapping patches
 const NSCALES           = length(PATCH_SIZES) # number of scales
 const CYCLE_SPIN        = true # random cycle spin for shift-invariant regularization
-const σ1A               = 1.0 # upper-bound from unitary FFTs and normalized smaps
+const σ1A               = 0.968294 # measured via tests/sigma1A_tests.jl (vs 1.0 upper-bound)
 const NITERS            = 100 # number of iterations
 const TOL               = 1e-2 # early stop tolerance for ||x_k - x_(k-1)||/||x_(k-1)||
 const USE_GPU           = true # GPU acceleration

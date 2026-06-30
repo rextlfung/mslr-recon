@@ -110,11 +110,11 @@ peak = N_opt × |X| + |img| + 3×|ksp| + persistent
 | `N_opt` | 6 (FPGM), 9 (POGM), 5 (PGM) | During Fcost: x0 (held by caller's X0 binding), xold, yold, fgrad, Fgrad, ynew; Fgradold/ynew_yold alias x0 for FPGM/PGM (zero extra cost) |
 | `\|img\|` | `\|X\| / Nscales` | `image_sum(X)` transient inside `dc_cost` |
 | `\|ksp\|` | `K·Nvc·Nt × 8 B`, K = Nx·Ny·Nz/R | `Ax` and `Ax−ksp` briefly coexist during `dc_cost` (×2 transients); plus the stored k-space array (×1 persistent) = ×3 total |
-| `persistent` | smaps + ksp + Ω + idx | smaps: `Nx·Ny·Nz·Nvc×8 B`; Ω: `Nx·Ny·Nz·Nt×1 B`; idx (GPU only): `K·Nt×4 B` |
+| `persistent` | smaps + Ω + idx | smaps: `Nx·Ny·Nz·Nvc×8 B`; Ω: `Nx·Ny·Nz·Nt×1 B`; idx (GPU only): `K·Nt×4 B` (ksp's own persistent copy is already counted in the ×3 of `\|ksp\|` above) |
 
-**Example — 20260409tap** (N=90×90×60, Nt=387, Nvc=21, R≈6, Nscales=2):
-- `|X|` = 3.01 GB, `|img|` = 1.51 GB, `|ksp|` = 5.27 GB, persistent = 5.66 GB
-- peak = 6×3.01 + 1.51 + 3×5.27 + 0.40 = **35.8 GB** (vs ~44 GB with POGM)
+**Example — 20260409tap** (N=90×90×60, Nt=375, Nvc=21, R≈6, Nscales=1):
+- `|X|` = 1.46 GB, `|img|` = 1.46 GB, `|ksp|` = 5.10 GB, persistent = 0.39 GB
+- peak = 6×1.46 + 1.46 + 3×5.10 + 0.39 = **25.9 GB** (vs ~30.3 GB with POGM)
 
 The peak occurs during `Fcostnew = Fcost(ynew)` — 6 FPGM buffers are live (x0, xold, yold, fgrad, Fgrad, ynew) and `dc_cost` allocates `image_sum + Ax + residual`. Note `|ksp|` is independent of `Nscales`; adding scales raises the optimizer buffer term but not the k-space transients.
 

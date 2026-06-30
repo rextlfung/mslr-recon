@@ -31,11 +31,11 @@ where:
 - $\mathbf{Y}$ is the measured k-space data shaped as a (space x time) matrix
 - $\mathcal{P}_k(\mathbf{X}_k)$ extracts and reshapes spatial patches of component $k$ as (voxels × time) matrices
 - $\|\cdot\|_*$ is the nuclear norm, which is the convex relaxation of the rank of a matrix.
-- $\lambda_k$ is set automatically via the Ong & Lustig (2016) formula — no manual tuning needed:
+- $\lambda_k$'s *relative* weighting across scales is set automatically via the Ong & Lustig (2016) formula:
 
 $$\lambda_k = \sqrt{p_k} + \sqrt{N_t} + \sqrt{\log\!\left(\frac{N_{vox} \cdot N_t}{\max(p_k,\, N_t)}\right)}$$
 
-where $p_k$ is the number of voxels in a patch at scale $k$. The paper specifies this weight only up to a constant (it is written with "$\sim$"), so the logarithm base is free: this code uses the natural log, whereas Ong & Lustig's reference MATLAB implementation uses $\log_2$ (giving a ~2–3% larger $\lambda_k$). The empirical `λ_GLOBAL` factor absorbs any global rescaling, so either base is consistent with the paper.
+where $p_k$ is the number of voxels in a patch at scale $k$. The paper specifies this weight only up to a constant (it is written with "$\sim$"), so the logarithm base is free: this code uses the natural log, whereas Ong & Lustig's reference MATLAB implementation uses $\log_2$ (giving a ~2–3% larger $\lambda_k$). The overall scale of all $\lambda_k$ together is still a free parameter — the paper itself sets it by visual inspection, not from the formula — and is exposed here as `λ_GLOBAL`. See the tuning note below.
 
 Optimization uses `pogm_restart` (from `src/mirt_mod.jl`) with gradient restart. The momentum scheme is configurable via the `mom` parameter (`:fpgm` default, `:pogm` for the Proximal Optimized Gradient Method, `:pgm` for plain gradient descent). The Lipschitz constant is $L = N_{scales} \cdot \sigma_1(\mathcal{A})^2$.
 
@@ -66,8 +66,6 @@ mslr-recon/
 │   └── sigma1A_tests.jl      # Measure σ₁(A) via power iteration
 │
 └── experiments/
-    ├── 20241017tap.jl        # Finger-tapping, 10 coils, Nt=300, 3-scale non-overlapping
-    ├── 20251106tap.jl        # Finger-tapping, 18 coils, 1-scale half-overlapping; λ sweep over 1 dataset
     ├── 20260317tap.jl        # Finger-tapping, 18 coils, Nt=387, 1-scale half-overlapping; λ sweep over 2 datasets
     └── 20260409tap.jl        # Finger-tapping, 21 coils, Nt=375, 1-scale half-overlapping; λ sweep over 2 datasets
 ```
@@ -302,7 +300,7 @@ The length of the per-iteration traces is `Niters_run+1`, where `Niters_run ≤ 
 
 ## Tips
 
-**λ is automatic.** The Ong & Lustig formula calibrates thresholds from patch geometry and Nt. It assumes the input k-space is prewhitened (σ_ksp ≈ 1) — BART's noise-prewhitening step satisfies this — so no manual tuning is needed.
+**λ's relative scaling is automatic; its overall magnitude is not.** The Ong & Lustig formula fixes the *relative* weighting of $\lambda_k$ across scales from patch geometry and Nt, and assumes the input k-space is prewhitened (σ_ksp ≈ 1) — BART's noise-prewhitening step satisfies this. But the formula is only specified up to a constant, and the paper itself sets that constant by visual inspection rather than deriving it — there is no formula-driven value for `λ_GLOBAL`. Expect to manually sweep `λ_GLOBAL` (see `LAMBDA_SWEEP` in experiment files) and pick a value by inspecting reconstructions.
 
 **Lipschitz constant.** `σ₁(A) ≤ 1.0` always — the unsubsampled operator is exactly unitary but subsampling reduces the spectral norm slightly (empirically `σ₁(A) ≈ 0.968` for the 20260409tap dataset). Set `σ1A = nothing` on the first run to measure it via power iteration (~20 min via `tests/sigma1A_tests.jl`), then hard-code the result. Using `1.0` is safe (conservative step size) but ~6.7% suboptimal.
 
