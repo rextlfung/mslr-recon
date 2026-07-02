@@ -1,17 +1,13 @@
 #=
 20260409tap.jl
-Experiment configuration for the 2026-04-08 finger-tapping dataset.
+Experiment configuration for the 2026-04-09 finger-tapping dataset.
 2.4 mm isotropic, 21 virtual coils, Nt=375 frames.
-Single-scale LR decomposition (6x6x6 patches), half-overlapping patches.
-Runs all 3 acquired datasets sequentially (caipi, caipi_ts, pd).
 
-Set use_gpu = true / false below, then run:
-
-  CPU (multi-threaded):
-      julia -t auto experiments/20260409tap.jl
-
-  GPU (recommended — RTX A6000 fits a 3-scale run; see CLAUDE.md for peak VRAM analysis):
+Set configurations below, then run:
+    GPU (recommended — RTX A6000 fits a 3-scale run):
       julia experiments/20260409tap.jl
+    CPU (multi-threaded):
+        julia -t auto experiments/20260409tap.jl
 =#
 
 using Pkg
@@ -24,9 +20,9 @@ Revise.includet(joinpath(@__DIR__, "..", "utils", "recon_cache.jl"))
 using .Reconstruct
 using .ReconCache
 
-const RECON_DIR  = "/StorageRAID/rexfung/20260409tap/recon"
+const RECON_DIR  = "/StorageRAID/rexfung/20260409tap/recon" # CHANGE ME: machine-specific data path
 const FN_SMAPS   = joinpath(RECON_DIR, "smaps_bart.mat")
-const PATCH_SIZES       = [[6,6,6]] # single scale
+const PATCH_SIZES       = [[90, 90,60], [20,20,20], [6,6,6]] # single scale
 const STRIDES           = [cld.(ps, 2) for ps in PATCH_SIZES] # half-overlapping patches
 const NSCALES           = length(PATCH_SIZES) # number of scales
 const CYCLE_SPIN        = true # random cycle spin for shift-invariant regularization
@@ -39,7 +35,7 @@ const MOMENTUM          = :fpgm # momentum
 # Lambda sweep — each entry is (λ_GLOBAL, output subfolder name within mslr/).
 # Folders must exist under RECON_DIR/mslr/ before running.
 const LAMBDA_SWEEP = [
-    (6.0, "L_6xlambda"),
+    (6.0, "G+L+L_6xlambda"),
 ]
 
 datasets = [

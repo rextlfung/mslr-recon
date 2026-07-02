@@ -22,8 +22,8 @@ using Statistics: mean
 include(joinpath(@__DIR__, "..", "src", "mirt_mod.jl"))
 using .MirtMod: poweriter
 
-const FN_KSP   = "/StorageRAID/rexfung/20260409tap/recon/pd_epi_zf.mat"
-const FN_SMAPS = "/StorageRAID/rexfung/20260409tap/recon/smaps_bart.mat"
+const FN_KSP   = "/StorageRAID/rexfung/20260409tap/recon/pd_epi_zf.mat" # CHANGE ME: machine-specific data path
+const FN_SMAPS = "/StorageRAID/rexfung/20260409tap/recon/smaps_bart.mat" # CHANGE ME: machine-specific data path
 const FRAME    = 1   # which time frame to use (all frames share the same smaps)
 
 println("Loading sensitivity maps …")

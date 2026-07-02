@@ -24,7 +24,7 @@ Revise.includet(joinpath(@__DIR__, "..", "utils", "recon_cache.jl"))
 using .Reconstruct
 using .ReconCache
 
-const RECON_DIR         = "/StorageRAID/rexfung/20260317tap/recon"
+const RECON_DIR         = "/StorageRAID/rexfung/20260317tap/recon" # CHANGE ME: machine-specific data path
 const FN_SMAPS          = joinpath(RECON_DIR, "smaps_bart.mat")
 const PATCH_SIZES       = [[6,6,6]] # local only
 const STRIDES           = [cld.(ps, 2) for ps in PATCH_SIZES] # half-overlapping patches
