@@ -24,7 +24,7 @@ Each component independently captures low-rank temporal structure at its own pat
 
 The reconstruction solves:
 
-$$\min_{\mathbf{X}} \; \frac{1}{2} \left\| \mathcal{A}\!\left(\sum_k \mathbf{X}_k\right) - \mathbf{Y} \right\|_F^2 \;+\; \sum_k \lambda_k \left\| \mathcal{P}_k(\mathbf{X}_k) \right\|_*$$
+$$\min_{\mathbf{X}} \quad \frac{1}{2} \left\| \mathcal{A}\left(\sum_k \mathbf{X}_k\right) - \mathbf{Y} \right\|_F^2 \quad+\quad \sum_k \lambda_k \left\| \mathcal{P}_k(\mathbf{X}_k) \right\|_*$$
 
 where:
 - $\mathcal{A}$ is the block-diagonal SENSE encoding operator (one block per time frame)
@@ -33,11 +33,11 @@ where:
 - $\|\cdot\|_*$ is the nuclear norm, which is the convex relaxation of the rank of a matrix.
 - $\lambda_k$'s *relative* weighting across scales is set automatically via the Ong & Lustig (2016) formula:
 
-$$\lambda_k = \sqrt{p_k} + \sqrt{N_t} + \sqrt{\log\!\left(\frac{N_{vox} \cdot N_t}{\max(p_k,\, N_t)}\right)}$$
+$$\lambda_k = \sqrt{p_k} + \sqrt{N_t} + \sqrt{\log\left(\frac{N_{vox} \cdot N_t}{\max(p_k, N_t)}\right)}$$
 
 where $p_k$ is the number of voxels in a patch at scale $k$. The paper specifies this weight only up to a constant (it is written with "$\sim$"), so the logarithm base is free: this code uses the natural log, whereas Ong & Lustig's reference MATLAB implementation uses $\log_2$ (giving a ~2–3% larger $\lambda_k$). The overall scale of all $\lambda_k$ together is still a free parameter — the paper itself sets it by visual inspection, not from the formula — and is exposed here as `λ_GLOBAL`. See the tuning note below.
 
-Optimization uses `pogm_restart` (from `src/mirt_mod.jl`) with gradient restart. The momentum scheme is configurable via the `mom` parameter (`:fpgm` default, `:pogm` for the Proximal Optimized Gradient Method, `:pgm` for plain gradient descent). The Lipschitz constant is $L = N_{scales} \cdot \sigma_1(\mathcal{A})^2$.
+Optimization uses `pogm_restart` (from `src/mirt_mod.jl`) with gradient restart. The momentum scheme is configurable via the `mom` parameter (`:fpgm` default, `:pogm` for the Proximal Optimized Gradient Method, `:pgm` for the plain Proximal Gradient Method, i.e. no momentum). The Lipschitz constant is $L = N_{scales} \cdot \sigma_1(\mathcal{A})^2$.
 
 ---
 
