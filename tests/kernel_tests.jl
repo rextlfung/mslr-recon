@@ -121,6 +121,35 @@ end
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 3b. SVST: subnormal-magnitude, near-rank-deficient patch (cuSOLVER NaN regression)
+#     Regression test for a cuSOLVER bug: GPU svd() returns all-NaN (in U, S, and
+#     Vt) on matrices with subnormal Float32 magnitude, even though they're
+#     otherwise well-conditioned (e.g. rank 1). CPU LAPACK handles the identical
+#     matrix correctly. This arises in real reconstructions when repeated
+#     soft-thresholding near a boundary leaves a patch with near-zero (but not
+#     exactly zero) residual content — confirmed via an actual failing patch
+#     (216x75, 215/216 exact-zero rows, ~1e-43 magnitude) pulled from a real
+#     wb_2.4mm run at λ=160.96. SVST's ‖X‖_F ≤ β short-circuit (src/recon.jl) is
+#     the fix: mathematically exact (not a heuristic), and it now runs on both
+#     backends instead of CPU-only.
+# ══════════════════════════════════════════════════════════════════════════════
+println("\n=== 3b. SVST — subnormal-magnitude near-rank-deficient patch ===")
+M_sub = zeros(ComplexF32, 216, 75)
+M_sub[1, :] .= 1f-42 .* randn(ComplexF32, 75)   # one subnormal-magnitude row, rest exact zero
+β_sub = 1f0                                     # any ordinary threshold — far above ‖M_sub‖_F
+res_sub_cpu, _ = SVST(M_sub, β_sub)
+check("SVST CPU — subnormal patch has no NaN", Float32(any(x -> !isfinite(x), res_sub_cpu)), 0.5f0)
+
+if HAS_GPU
+    res_sub_gpu, _ = SVST(cu(M_sub), β_sub)
+    has_nan_gpu = any(x -> !isfinite(x), Array(res_sub_gpu))
+    check("SVST GPU — subnormal patch has no NaN", Float32(has_nan_gpu), 0.5f0)
+else
+    println("  [SKIP] GPU not available")
+end
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 4. patchSVST — non-unit patches
 #    CPU: img2patches → @threads _svst_loop! → patches2img
 #    GPU: streaming per-patch SVST via AbstractArray dispatch
@@ -244,6 +273,53 @@ end
 
 check("dc_cost_grad threaded residual vs block_diag", relerr(res_thr, res_ref), 1f-5)
 check("dc_cost_grad threaded gradient vs block_diag", relerr(g_thr,   g_ref),   1f-5)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 9. Asense adjoint consistency with an ODD spatial dimension.
+#    Regression test for the fftshift/ifftshift adjoint-pairing bug found in
+#    Asense_gpu (src/sense_gpu.jl): fftshift and ifftshift coincide for even-length
+#    dimensions but differ for odd ones, so a wrong shift pairing in the adjoint was
+#    invisible on every previously-tested (all-even) shape above. Uses Nz=5 (odd)
+#    here; the real-world case that surfaced this was slab_0.9mm's Nz=45.
+# ══════════════════════════════════════════════════════════════════════════════
+println("\n=== 9. Asense adjoint consistency — ODD spatial dimension (Nz=5) ===")
+Random.seed!(101)
+Nx9, Ny9, Nz9, Nc9 = 8, 8, 5, 3
+smaps9 = randn(ComplexF32, Nx9, Ny9, Nz9, Nc9)
+smaps9 ./= (sqrt.(sum(abs2.(smaps9); dims=4)) .+ eps(Float32))
+
+samp9 = zeros(Bool, Nx9, Ny9, Nz9)
+samp9[1:2:end, :, :] .= true
+K9 = sum(samp9)
+
+A9_cpu = Asense(samp9, smaps9; fft_forward=true, unitary=true)
+x9 = randn(ComplexF32, Nx9, Ny9, Nz9)
+y9 = randn(ComplexF32, K9, Nc9)
+
+Ax9_cpu  = A9_cpu * x9
+Aty9_cpu = A9_cpu' * y9
+lhs9_c = dot(vec(Ax9_cpu), vec(y9))
+rhs9_c = dot(vec(x9), vec(Aty9_cpu))
+check("Asense adjoint consistency, odd Nz (CPU)",
+      abs(lhs9_c - rhs9_c) / (abs(lhs9_c) + eps(Float32)), 1f-4)
+
+if HAS_GPU
+    smaps9_gpu = cu(smaps9)
+    A9_gpu = Asense_gpu(samp9, smaps9_gpu; fft_forward=true, unitary=true)
+    x9_gpu = cu(x9)
+    y9_gpu = cu(y9)
+    Ax9_gpu  = A9_gpu * x9_gpu
+    Aty9_gpu = A9_gpu' * y9_gpu
+
+    check("Asense forward  CPU vs GPU, odd Nz", relerr(Ax9_gpu, Ax9_cpu), 1f-4)
+    check("Asense adjoint  CPU vs GPU, odd Nz", relerr(Aty9_gpu, Aty9_cpu), 1f-4)
+
+    lhs9_g = dot(vec(Array(Ax9_gpu)), vec(Array(y9_gpu)))
+    rhs9_g = dot(vec(Array(x9_gpu)), vec(Array(Aty9_gpu)))
+    check("Asense adjoint consistency, odd Nz (GPU)",
+          abs(lhs9_g - rhs9_g) / (abs(lhs9_g) + eps(Float32)), 1f-4)
+end
 
 
 # ── Summary ───────────────────────────────────────────────────────────────────

@@ -100,9 +100,9 @@ function Asense_gpu(samp::AbstractArray{Bool}, smaps::CuArray;
         kc_full = reshape(kc_full, N..., Nc)               # (Nx, Ny, Nz, Nc)
 
         if fft_forward
-            xc = adj_scale .* ifftshift(ifft(fftshift(kc_full, D), D), D)
+            xc = adj_scale .* fftshift(ifft(ifftshift(kc_full, D), D), D)
         else
-            xc = adj_scale .* ifftshift(fft(fftshift(kc_full, D), D), D)
+            xc = adj_scale .* fftshift(fft(ifftshift(kc_full, D), D), D)
         end
 
         # SENSE combination: sum over coils with conjugate smaps

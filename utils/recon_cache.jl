@@ -4,8 +4,13 @@ using MAT
 
 export params_match
 
-function _to_mat(v::Vector{<:Vector})
-    hcat(v...)
+function _to_mat(v::AbstractVector)
+    # MAT.jl round-trips a length-1 Vector{Vector{Int}} (single-scale PATCH_SIZES,
+    # e.g. [[6,6,6]]) as Vector{Any}, which fails a Vector{<:Vector} dispatch even
+    # though every element is itself a vector — broadened to a runtime check so
+    # single-scale configs compare correctly instead of silently erroring (caught
+    # by params_match's try/catch and misreported as "different parameters").
+    all(x -> x isa AbstractVector, v) ? hcat(v...) : v
 end
 _to_mat(m::AbstractMatrix) = m
 

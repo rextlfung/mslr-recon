@@ -253,10 +253,20 @@ On CPU, zero singular values are skipped for efficiency.
 On GPU, a full matrix multiply is used (findall is slow on GPU).
 """
 function SVST(X::AbstractMatrix, β)
-    # Skip SVD for zero patches to avoid LAPACK SLASCL warnings — CPU only.
-    # On GPU, calling norm() launches cuBLAS + a device→host copy per patch,
-    # which exhausts CUDA resources when called 486k times (unit-patch scale).
-    X isa Array && norm(X) == 0 && return fill!(similar(X), zero(eltype(X))), 0f0
+    # Skip SVD whenever ‖X‖_F ≤ β: since σ_max(X) ≤ ‖X‖_F, every singular value is
+    # then ≤ β too, so SVST is exactly zero — not an approximation, a mathematically
+    # exact shortcut (generalizes the old norm(X)==0 special case). This also works
+    # around a cuSOLVER bug: GPU svd() returns all-NaN (not just imprecise) on
+    # matrices with subnormal Float32 magnitude, which repeated soft-thresholding
+    # near a boundary can produce (confirmed directly: a 216×75 patch with 215/216
+    # exact-zero rows and ~1e-43 magnitude — CPU LAPACK handles it fine, GPU
+    # cuSOLVER returns NaN in U, S, and Vt). Applies on both backends: unit patches
+    # ([1,1,1]) never reach this function (routed to _unit_block_svst instead), so
+    # call counts here are patch-grid-sized (thousands), not voxel-sized (~486k) —
+    # the device→host sync cost of norm() on GPU is negligible next to a multi-hour
+    # divergence from unguarded NaN.
+    β_norm = real(eltype(X))(β)
+    norm(X) <= β_norm && return fill!(similar(X), zero(eltype(X))), 0f0
 
     # DivideAndConquer SVD is fastest on CPU but can fail for ill-conditioned
     # matrices; fall back to QRIteration (CPU only via LAPACK)
