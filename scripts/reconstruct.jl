@@ -57,6 +57,29 @@ end
 
 export run_recon
 
+# ── Input loading: dispatch on file extension ──────────────────────────────
+# .mat (MATLAB v7.3, HDF5-backed): complex arrays are stored as a real/imag
+# struct, and HDF5.jl already restores MATLAB's logical (column-major)
+# dimension order on read — MATLAB's HDF5 writer stores dims C-order-reversed
+# on disk, and HDF5.jl reverses them back.
+# .h5 (row-major writers, e.g. Python/h5py — the sigpy export pipeline):
+# complex arrays are stored natively, but the on-disk dimension order already
+# equals the logical (numpy) order, so HDF5.jl's read-time reversal must be
+# undone with permutedims to recover it.
+# Verified against this codebase's actual paired .mat/.h5 exports (identical
+# k-space sampling masks and matching smaps shapes after correction).
+function _load_array(fn::String, key::String)
+    ext = lowercase(splitext(fn)[2])
+    raw = h5read(fn, key)
+    if ext == ".mat"
+        return ComplexF32.([complex(v.real, v.imag) for v in raw])
+    elseif ext == ".h5" || ext == ".hdf5"
+        return ComplexF32.(permutedims(raw, reverse(1:ndims(raw))))
+    else
+        error("Unsupported input file extension '$ext' for $fn — expected .mat or .h5")
+    end
+end
+
 function run_recon(;
     fn_ksp::String,
     fn_smaps::String,
@@ -93,15 +116,14 @@ function run_recon(;
 
     # ── 1. Sensitivity maps: load, cast, normalize ───────────────────────────
     println("Loading sensitivity maps …")
-    smaps_raw = ComplexF32.(matread(fn_smaps)["smaps"])
+    smaps_raw = _load_array(fn_smaps, "smaps")
     smaps_cpu = smaps_raw ./ (sqrt.(sum(abs2.(smaps_raw); dims=4)) .+ eps(Float32))
     println("  Sensitivity maps: ", size(smaps_cpu))
 
 
     # ── 2. Load k-space ───────────────────────────────────────────────────────
     println("Loading k-space …")
-    ksp0 = h5read(fn_ksp, "ksp_epi_zf")
-    ksp0 = ComplexF32.([complex(k.real, k.imag) for k in ksp0])
+    ksp0 = _load_array(fn_ksp, "ksp_epi_zf")
     Nx, Ny, Nz, Nvc, Nt = size(ksp0)
     @assert size(smaps_cpu) == (Nx, Ny, Nz, Nvc) "smaps shape $(size(smaps_cpu)) doesn't match k-space dims ($Nx,$Ny,$Nz,$Nvc)"
 

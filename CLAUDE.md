@@ -60,7 +60,7 @@ The sampling mask `Ω` is moved to GPU (`cu(Ω)`) alongside k-space so that k-sp
 ### Data flow inside `run_recon`
 
 1. Load and normalize sensitivity maps (L2 norm per voxel across coils).
-2. Load k-space from HDF5-backed `.mat` (key `ksp_epi_zf`), cast to `ComplexF32`.
+2. Load k-space (key `ksp_epi_zf`), cast to `ComplexF32`. Accepts either a `.mat` (MATLAB v7.3, HDF5-backed) or a `.h5` (e.g. sigpy) file — see `_load_array` below.
 3. Infer sampling mask `Ω` from zero entries; validate mask consistency across coils and frames.
 4. Optionally move data to GPU.
 5. Build block-diagonal SENSE operator `A` (one block per time frame).
@@ -125,7 +125,9 @@ The peak occurs during `Fcostnew = Fcost(ynew)` — 6 FPGM buffers are live (x0,
 4. **idx arrays**: 0.125 GB GPU-only overhead (`Asense_gpu` pre-computes Int32 gather indices; `MIRT.Asense` uses the Bool mask directly).
 5. **Resource type**: VRAM is a hard limit (24–80 GB); RAM is typically 64–512 GB with swap as overflow.
 
-**Sensitivity map format**: `run_recon` reads the key `"smaps"` (not `"smaps_raw"`) from `fn_smaps`. The file is a `.mat` written by BART after compression to `Nvc` virtual coils.
+**Sensitivity map format**: `run_recon` reads the key `"smaps"` (not `"smaps_raw"`) from `fn_smaps`. The file is either a `.mat` written by BART or a `.h5` written by sigpy, both after compression to `Nvc` virtual coils.
+
+**Input file formats (`.mat` / `.h5`)**: `fn_ksp` and `fn_smaps` each accept a `.mat` (MATLAB v7.3, HDF5-backed — BART's output) or a `.h5` (written by a row-major tool such as Python/h5py — e.g. sigpy's output) file, dispatched by extension in `_load_array` (`scripts/reconstruct.jl`). Both formats are read via `h5read`, but need different correction: MATLAB's HDF5 writer stores array dims C-order-reversed on disk, which `HDF5.jl` reverses back on read, restoring MATLAB's logical (column-major) dimension order automatically — and MATLAB stores complex numbers as a `{real, imag}` struct, reassembled with `complex.(v.real, v.imag)`. Row-major writers store dims in the same order as `HDF5.jl` reports them on disk (no pre-reversal), so `HDF5.jl`'s automatic reversal on read must itself be undone with `permutedims(raw, reverse(1:ndims(raw)))` to recover the logical (numpy) shape; complex numbers are stored natively, no struct reassembly needed. Verified on `20260810ball`'s paired BART `.mat` / sigpy `.h5` exports: bit-identical sampling masks after correction.
 
 **Experiment file structure**: All tunable parameters (`PATCH_SIZES`, `STRIDES`, `NITERS`, `σ1A`, `MOMENTUM`, `TOL`, `CYCLE_SPIN`) are declared as `const` at the top of each experiment file. Newer experiments also declare a `LAMBDA_SWEEP` array of `(λ_GLOBAL, subfolder)` tuples and loop over `LAMBDA_SWEEP × datasets`, with `try/catch` around each reconstruction for error resilience. Each experiment guards `run_recon` with a three-branch check: output missing → run; output exists and `params_match(fn_out; ...)` returns true → skip recon, regenerate report; output exists but params differ → `@warn` and skip (no overwrite). `params_match` (from `utils/recon_cache.jl`) checks `NITERS`, `PATCH_SIZES`, `STRIDES`, `σ1A`, `mom`, `conv_tol`, `lambda_global`, and `cycle_spin`. To run with new parameters, shelve the old output to a subdirectory first.
 
