@@ -36,7 +36,7 @@ using Base.Threads
 using LinearMapsAA: block_diag, undim
 using MIRT: Asense
 using Statistics, StatsBase
-using MAT, HDF5
+using MAT, HDF5, NIfTI
 
 include(joinpath(@__DIR__, "..", "src", "recon.jl"))
 include(joinpath(@__DIR__, "..", "src", "metrics.jl"))
@@ -386,9 +386,14 @@ function run_recon(;
         "iter_time_s"  => iter_time_s,
     ); compress=true)
 
+    # Magnitude NIfTI export (fsleyes/SPM/AFNI-compatible; complex phase is discarded).
+    fn_nii = splitext(fn_out)[1] * ".nii.gz"
+    niwrite(fn_nii, NIVolume(Float32.(abs.(X_recon))))
+
     mm, ss = divrem(round(Int, runtime_s), 60)
     println("Wall-clock: $(mm)m $(ss)s ($(round(runtime_s; digits=1)) s), $(round(iter_time_s; digits=1)) s/iter")
     println("\n✓ Saved → $fn_out")
+    println("✓ Saved → $fn_nii")
     return fn_out
 end
 
