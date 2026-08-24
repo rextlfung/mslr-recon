@@ -1,6 +1,6 @@
 module MirtMod
 
-export pogm_restart, poweriter
+export pogm_restart, poweriter, poweriter_frames
 
 #=
 mirt_mod.jl
@@ -40,11 +40,22 @@ with the following changes:
 
 poweriter wraps MIRT.poweriter, adding a ProgressMeter progress bar.
 
+poweriter_frames estimates σ₁ per time frame instead of on the full stacked
+block-diagonal operator: since ‖block_diag(A_1,...,A_n)‖ = max_t ‖A_t‖ exactly
+(block-diagonal spectral norm = max over blocks, attained by a vector supported
+on the argmax block), running poweriter on each (much smaller) Aframes[t] and
+taking the max recovers σ₁(A) exactly, while being cheaper (each frame's
+forward/adjoint apply is Nt times smaller than the full stack's) and exposing
+the per-frame spread. Frames run concurrently via @threads on CPU (embarrassingly
+parallel, no shared mutable state); CuArrays can't use @threads, so GPU frames
+run sequentially.
+
 Original algorithm: Donghwan Kim & Jeff Fessler, University of Michigan, 2017-2018.
 Modified by Rex Fung, University of Michigan, 2025.
 =#
 
 using LinearAlgebra: norm, dot
+using Base.Threads: @threads
 using ProgressMeter
 
 
@@ -257,11 +268,12 @@ function poweriter(
     tol::Real                     = 1e-6,
     x0::AbstractArray{<:Number}   = ones(eltype(A), size(A, 2)),
     chat::Bool                    = true,
+    show_progress::Bool           = true,
 )
     x         = copy(x0)
     ratio_old = Inf
 
-    @showprogress 1 "Power iterating..." for iter in 1:niter
+    @showprogress dt=1 desc="Power iterating..." enabled=show_progress for iter in 1:niter
         Ax    = A * x
         ratio = norm(Ax) / norm(x)
         if abs(ratio - ratio_old) / ratio < tol
@@ -274,6 +286,37 @@ function poweriter(
     end
 
     return x, norm(A * x) / norm(x)
+end
+
+"""
+    σ1s, σ1_max = poweriter_frames(Aframes; niter=200, tol=1e-6, use_gpu=false)
+
+Estimate σ₁ independently for each per-frame operator in `Aframes` and return
+both the per-frame array and their max — which equals σ₁ of the full stacked
+block-diagonal operator exactly (see module docstring). `Aframes` must already
+be `undim`-ed (flat vector-space LinearMaps), same convention as `poweriter`.
+"""
+function poweriter_frames(
+    Aframes::AbstractVector;
+    niter::Int    = 200,
+    tol::Real     = 1e-6,
+    use_gpu::Bool = false,
+)
+    Nt  = length(Aframes)
+    σ1s = zeros(Float64, Nt)
+    if use_gpu
+        # CuArrays can't use @threads (same constraint as dc_cost/dc_cost_grad
+        # in reconstruct.jl) — sequential, but each frame is Nt times cheaper
+        # than the full stacked operator.
+        @showprogress 1 "Power iterating per frame..." for it in 1:Nt
+            _, σ1s[it] = poweriter(Aframes[it]; niter, tol, chat=false, show_progress=false)
+        end
+    else
+        @showprogress desc="Power iterating per frame..." @threads for it in 1:Nt
+            _, σ1s[it] = poweriter(Aframes[it]; niter, tol, chat=false, show_progress=false)
+        end
+    end
+    return σ1s, maximum(σ1s)
 end
 
 end # module MirtMod

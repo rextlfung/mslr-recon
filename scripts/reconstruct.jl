@@ -187,11 +187,22 @@ function run_recon(;
     end
 
 
-    # ── 6. Lipschitz constant ─────────────────────────────────────────────────
+    # ── 6. Lipschitz constant ───────────────────────────────────────────────────
+    # σ₁(A) = σ₁(block_diag(Aframes...)) = max_t σ₁(Aframes[t]) exactly, since the
+    # spectral norm of a block-diagonal operator equals the max over its blocks
+    # (attained by a vector supported on the argmax block). Power-iterating each
+    # frame separately — instead of the Nt-times-larger stacked operator — is both
+    # cheaper and surfaces how σ₁ varies frame-to-frame.
+    σ1_per_frame = nothing
     if isnothing(σ1A)
-        println("Computing σ₁(A) via power iteration (may take ~20 min) …")
-        _, σ1A = poweriter(undim(A))
-        println("  σ₁(A) = ", round(σ1A; digits=4))
+        println("Computing σ₁(A) via per-frame power iteration …")
+        σ1_per_frame, σ1A = poweriter_frames(undim.(Aframes); use_gpu)
+        worst_frame = argmax(σ1_per_frame)
+        println("  σ₁(A) = ", round(σ1A; digits=6), " (max at frame $worst_frame of $Nt)")
+        println("  per-frame σ₁: min=", round(minimum(σ1_per_frame); digits=6),
+                " mean=", round(mean(σ1_per_frame); digits=6),
+                " std=", round(std(σ1_per_frame); digits=6),
+                " max=", round(maximum(σ1_per_frame); digits=6))
     end
     L = Nscales * σ1A^2
 
@@ -370,6 +381,7 @@ function run_recon(;
         "rel_changes"  => rel_changes,
         "R"            => R,
         "sigma1A"      => σ1A,
+        "sigma1_per_frame" => something(σ1_per_frame, Float64[]),
         "L"            => L,
         "Nscales"      => Nscales,
         "patch_sizes"  => PATCH_SIZES,
