@@ -1,15 +1,14 @@
 #=
 20260810ball.jl
 Experiment configuration for the 2026-08-10 ball-phantom dataset.
-Two acquisitions with independent spatial grids, coil counts, and smaps files:
-  - wb_2.4mm:   whole-brain, 2.4mm iso, 12 virtual coils, Nx=90,Ny=90,Nz=60,   Nt=75
-  - slab_0.9mm: slab,        0.9mm iso, 18 virtual coils, Nx=240,Ny=240,Nz=45, Nt=30
 
-Sweeps two axes per dataset: low-rank configuration (local-only vs global+local+sparse,
-with the global scale bound to each dataset's own spatial dims) and λ_GLOBAL (reusing
-the 1x-10x sweep from 20260317tap.jl). σ1A uses the conservative 1.0 upper bound since
-no measured value exists yet for this dataset (verified safe: measured σ1(A)≈0.999 via
-power iteration on both wb_2.4mm and slab_0.9mm, all 30 slab frames checked).
+This run targets only slab_0.9mm (slab, 0.9mm iso, 18 virtual coils,
+Nx=240,Ny=240,Nz=45, Nt=30), using the sigpy .h5 exports (k-space and smaps),
+and sweeps low-rank configuration only: global-only (G), local-only (L, patch
+[15,15,15]), and global+local (G+L). λ_GLOBAL is fixed at 9.0 (no sweep).
+σ1A uses the conservative 1.0 upper bound since no measured value exists yet
+for this dataset (verified safe: measured σ1(A)≈0.999 via power iteration on
+both wb_2.4mm and slab_0.9mm, all 30 slab frames checked).
 
 Two GPU-specific bugs were found and worked around here — see
 mslr/_diverged_gpu_cyclespin/DIAGNOSIS.md for the full writeup:
@@ -27,8 +26,7 @@ mslr/_diverged_gpu_cyclespin/DIAGNOSIS.md for the full writeup:
    src/sense_gpu.jl on 2026-08-16 and verified: tests/kernel_tests.jl now includes
    an odd-dimension regression case (17/17 pass), and the real slab_0.9mm adjoint
    error dropped from 159% to 0.037% (matching CPU). slab_0.9mm's `use_gpu` below
-   was switched back to `true` accordingly — the first 6 "L" config runs (all λ)
-   already completed correctly on CPU before the fix; only later runs use GPU.
+   is `true` accordingly.
 
 Set each dataset's `use_gpu` below as needed.
 
@@ -61,47 +59,35 @@ const NITERS     = 100    # number of iterations
 const TOL        = 1e-3   # early stop tolerance for ||x_k - x_(k-1)||/||x_(k-1)||
 const MOMENTUM   = :fpgm  # momentum
 
-const LAMBDA_SWEEP = [
-    (1.0,  "1xlambda"),
-    (2.0,  "2xlambda"),
-    (4.0,  "4xlambda"),
-    (6.0,  "6xlambda"),
-    (8.0,  "8xlambda"),
-    (10.0, "10xlambda"),
-]
+const λ_GLOBAL = 9.0
 
-# Each dataset carries its own smaps file, spatial dims (for the "global" patch scale),
-# and its own use_gpu — slab_0.9mm MUST stay on CPU until the Asense_gpu odd-dimension
-# adjoint bug documented above is fixed.
+# slab_0.9mm only, using the sigpy .h5 exports (k-space and smaps).
 datasets = [
-    (ksp     = "wb_2.4mm_epi_zf.mat",
-     smaps   = "smaps_wb_2.4mm_bart.mat",
-     name    = "wb_2.4mm_recon",
-     dims    = [90, 90, 60],
-     use_gpu = true),
-    (ksp     = "slab_0.9mm_epi_zf.mat",
-     smaps   = "smaps_slab_0.9mm_bart.mat",
+    (ksp     = "slab_0.9mm_epi_zf.h5",
+     smaps   = "smaps_slab_0.9mm_sigpy.h5",
      name    = "slab_0.9mm_recon",
      dims    = [240, 240, 45],
      use_gpu = true),  # Asense_gpu odd-dimension adjoint bug fixed in src/sense_gpu.jl
 ]
 
-# Two low-rank configuration tiers, with the global scale bound to each dataset's own
-# (Nx,Ny,Nz). STRIDES = half-overlapping throughout.
+# Three low-rank configuration tiers, with the global scale bound to each dataset's own
+# (Nx,Ny,Nz) and the local scale at patch [15,15,15]. STRIDES = half-overlapping throughout.
 function configs_for(dims::Vector{Int})
     half_overlap(ps) = [cld.(p, 2) for p in ps]
 
-    local_ps       = [[6, 6, 6]]
-    glob_loc_sp_ps = [dims, [6, 6, 6], [1, 1, 1]]
+    glob_ps     = [dims]
+    local_ps    = [[15, 15, 15]]
+    glob_loc_ps = [dims, [15, 15, 15]]
 
     return [
-        (name = "L",     PATCH_SIZES = local_ps,       STRIDES = half_overlap(local_ps)),
-        (name = "G+L+S", PATCH_SIZES = glob_loc_sp_ps, STRIDES = half_overlap(glob_loc_sp_ps)),
+        (name = "G",   PATCH_SIZES = glob_ps,     STRIDES = half_overlap(glob_ps)),
+        (name = "L",   PATCH_SIZES = local_ps,    STRIDES = half_overlap(local_ps)),
+        (name = "G+L", PATCH_SIZES = glob_loc_ps, STRIDES = half_overlap(glob_loc_ps)),
     ]
 end
 
-for ds in datasets, cfg in configs_for(ds.dims), (λ_GLOBAL, λ_tag) in LAMBDA_SWEEP
-    subdir = "$(cfg.name)_$(λ_tag)"
+for ds in datasets, cfg in configs_for(ds.dims)
+    subdir = cfg.name
     fn_out = joinpath(RECON_DIR, "mslr", subdir, "$(ds.name).mat")
     try
         if !isfile(fn_out)
