@@ -292,8 +292,16 @@ function run_recon(;
     g_prox = (X, c) -> begin
         # Force GC before the first scale's patch-tensor allocation to free any
         # lingering gradient intermediates from dc_cost_grad (image_sum, Ax, residual, g
-        # each up to 4.9 GB on GPU but not collected promptly by the GC).
-        use_gpu && (GC.gc(true); CUDA.reclaim())
+        # each up to 4.9 GB on GPU but not collected promptly by the GC). GC.gc(false)
+        # (incremental/young-gen only), not GC.gc(true) (full heap sweep): measured
+        # in-situ on real 20260822ball_radial G+L data (RTX A6000) that the recently-
+        # dead large CuArrays this exists to free are young enough for an incremental
+        # collection to catch -- GC.gc(false);CUDA.reclaim() costs ~0.04-0.80s/iter
+        # (avg ~0.41s) vs GC.gc(true)'s ~0.86-1.85s/iter (avg ~1.05s), while still
+        # keeping several GB of headroom throughout (min observed 2.76 GB free, vs.
+        # ~0 GB free within a few iterations if this call is skipped entirely -- so
+        # skipping it outright is not a safe alternative on this problem size/GPU).
+        use_gpu && (GC.gc(false); CUDA.reclaim())
         reg = 0f0
         for k in 1:Nscales
             img_k = X[:, :, :, :, k]
